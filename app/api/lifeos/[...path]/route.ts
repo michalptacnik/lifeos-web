@@ -4,10 +4,11 @@ import { buildAuthOptions } from "../../../../lib/auth";
 
 const API_BASE = process.env.LIFEOS_API_BASE_URL ?? "http://127.0.0.1:4000";
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
+const DEV_AUTH_BYPASS_EMAIL = process.env.DEV_AUTH_BYPASS_EMAIL?.toLowerCase();
 
 async function proxy(request: NextRequest, path: string[]) {
   const session = await getServerSession(buildAuthOptions());
-  const actorEmail = session?.user?.email?.toLowerCase();
+  const actorEmail = session?.user?.email?.toLowerCase() ?? DEV_AUTH_BYPASS_EMAIL;
 
   if (!actorEmail) {
     return NextResponse.json({ message: "Unauthorized" }, { status: 401 });

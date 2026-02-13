@@ -40,6 +40,9 @@ const statusMeta: Record<TaskStatus, { title: string; tone: string }> = {
 };
 
 
+const authBypassEnabled = process.env.NEXT_PUBLIC_AUTH_BYPASS === "true";
+const bypassEmail = process.env.NEXT_PUBLIC_AUTH_BYPASS_EMAIL ?? "builder.local";
+
 const emptyTaskForm = {
   title: "",
   description: "",
@@ -71,6 +74,7 @@ function timerLabel(startedAt: string, nowMs: number) {
 
 export default function HomePage() {
   const { data: session, status } = useSession();
+  const effectiveUserEmail = session?.user?.email ?? (authBypassEnabled ? bypassEmail : undefined);
   const [tab, setTab] = useState<TabKey>("kanban");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [worktime, setWorktime] = useState<WorktimePayload>({ queueTasks: [], activeSession: null, recentSessions: [] });
@@ -104,7 +108,7 @@ export default function HomePage() {
   }
 
   async function refreshAll() {
-    if (!session?.user?.email) {
+    if (!effectiveUserEmail) {
       setLoading(false);
       return;
     }
@@ -115,7 +119,7 @@ export default function HomePage() {
       const [tasksData, worktimeData] = await Promise.all([api<Task[]>("/tasks"), api<WorktimePayload>("/worktime")]);
       setTasks(tasksData);
       setWorktime(worktimeData);
-      setTaskForm((prev) => ({ ...prev, ownerEmail: prev.ownerEmail || session.user?.email || "" }));
+      setTaskForm((prev) => ({ ...prev, ownerEmail: prev.ownerEmail || effectiveUserEmail || "" }));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -125,7 +129,7 @@ export default function HomePage() {
 
   useEffect(() => {
     refreshAll();
-  }, [session?.user?.email]);
+  }, [effectiveUserEmail]);
 
   useEffect(() => {
     const loadProviders = async () => {
@@ -160,13 +164,13 @@ export default function HomePage() {
           title: taskForm.title,
           description: taskForm.description || null,
           project: taskForm.project || null,
-          ownerEmail: taskForm.ownerEmail || session?.user?.email || null,
+          ownerEmail: taskForm.ownerEmail || effectiveUserEmail || null,
           startedOn: taskForm.startedOn ? new Date(taskForm.startedOn).toISOString() : null,
           finishedOn: taskForm.finishedOn ? new Date(taskForm.finishedOn).toISOString() : null,
           status: "TODO"
         })
       });
-      setTaskForm({ ...emptyTaskForm, ownerEmail: session?.user?.email || "" });
+      setTaskForm({ ...emptyTaskForm, ownerEmail: effectiveUserEmail || "" });
       setCreateOpen(false);
       await refreshAll();
     } catch (err) {
@@ -180,7 +184,7 @@ export default function HomePage() {
       title: task.title,
       description: task.description ?? "",
       project: task.project ?? "",
-      ownerEmail: task.ownerEmail ?? session?.user?.email ?? "",
+      ownerEmail: task.ownerEmail ?? effectiveUserEmail ?? "",
       startedOn: toInputDate(task.startedOn),
       finishedOn: toInputDate(task.finishedOn)
     });
@@ -293,7 +297,7 @@ export default function HomePage() {
     return <main className="mx-auto max-w-5xl px-4 py-8">Loading session...</main>;
   }
 
-  if (status === "unauthenticated") {
+  if (status === "unauthenticated" && !authBypassEnabled) {
     return (
       <main className="mx-auto max-w-md px-4 py-12">
         <section className="rounded-3xl border border-white/80 bg-white/92 p-6 shadow-[0_16px_36px_rgba(45,74,110,0.18)]">
@@ -342,11 +346,11 @@ export default function HomePage() {
           <div>
             <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">LifeOS</p>
             <h1 className="text-2xl font-semibold text-slate-900">Tasks</h1>
-            <p className="text-xs text-slate-600">{session?.user?.email}</p>
+            <p className="text-xs text-slate-600">{effectiveUserEmail}</p>
           </div>
           <div className="flex gap-2">
             <button onClick={() => setCreateOpen(true)} className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white">+ Task</button>
-            <button onClick={() => signOut()} className="rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-800">Sign out</button>
+            {session?.user?.email ? <button onClick={() => signOut()} className="rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-800">Sign out</button> : null}
           </div>
         </div>
         <div className="mt-3 grid grid-cols-3 gap-2">
