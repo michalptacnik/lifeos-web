@@ -39,8 +39,6 @@ const statusMeta: Record<TaskStatus, { title: string; tone: string }> = {
   DONE: { title: "Done", tone: "#c6f2d0" }
 };
 
-const googleEnabled = process.env.NEXT_PUBLIC_GOOGLE_AUTH_ENABLED === "true";
-const appleEnabled = process.env.NEXT_PUBLIC_APPLE_AUTH_ENABLED === "true";
 
 const emptyTaskForm = {
   title: "",
@@ -85,6 +83,8 @@ export default function HomePage() {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [editingValues, setEditingValues] = useState(emptyTaskForm);
   const [tick, setTick] = useState(Date.now());
+  const [availableProviders, setAvailableProviders] = useState({ google: false, apple: false });
+  const [setupMessage, setSetupMessage] = useState<string | null>(null);
 
   const selectedTask = useMemo(() => tasks.find((t) => t.id === selectedTaskId) ?? null, [tasks, selectedTaskId]);
   const activeTask = worktime.activeSession?.task ?? selectedTask;
@@ -126,6 +126,23 @@ export default function HomePage() {
   useEffect(() => {
     refreshAll();
   }, [session?.user?.email]);
+
+  useEffect(() => {
+    const loadProviders = async () => {
+      try {
+        const res = await fetch("/api/setup/oauth", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = (await res.json()) as { providers?: { google?: boolean; apple?: boolean } };
+        setAvailableProviders({
+          google: Boolean(data.providers?.google),
+          apple: Boolean(data.providers?.apple)
+        });
+      } catch {
+      }
+    };
+
+    loadProviders();
+  }, []);
 
   useEffect(() => {
     if (!worktime.activeSession) return;
@@ -237,11 +254,39 @@ export default function HomePage() {
 
   async function saveSessionNote(sessionId: string, notes: string) {
     try {
-      await api<WorkSession>(`/worktime/${sessionId}`, { method: "PATCH", body: JSON.stringify({ notes }) });
+      await api<WorkSession>("/worktime/" + sessionId, { method: "PATCH", body: JSON.stringify({ notes }) });
       await refreshAll();
     } catch (err) {
       setError((err as Error).message);
     }
+  }
+
+  async function runOAuthSetup() {
+    const token = window.prompt("Setup token")?.trim();
+    if (!token) return;
+
+    const googleClientId = window.prompt("Google Client ID (blank to keep empty)") ?? "";
+    const googleClientSecret = window.prompt("Google Client Secret (blank to keep empty)") ?? "";
+    const appleClientId = window.prompt("Apple Client ID (blank to keep empty)") ?? "";
+    const appleClientSecret = window.prompt("Apple Client Secret (blank to keep empty)") ?? "";
+
+    const res = await fetch("/api/setup/oauth", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ setupToken: token, googleClientId, googleClientSecret, appleClientId, appleClientSecret })
+    });
+
+    const payload = await res.json();
+    if (!res.ok) {
+      setSetupMessage(payload.message ?? "OAuth setup failed");
+      return;
+    }
+
+    setAvailableProviders({
+      google: Boolean(payload.providers?.google),
+      apple: Boolean(payload.providers?.apple)
+    });
+    setSetupMessage("OAuth credentials saved. You can sign in now.");
   }
 
   if (status === "loading") {
@@ -257,23 +302,30 @@ export default function HomePage() {
           <p className="mt-2 text-sm text-slate-700">Use SSO only. Email/password login is disabled.</p>
           <div className="mt-5 space-y-2">
             <button
-              disabled={!googleEnabled}
+              disabled={!availableProviders.google}
               onClick={() => signIn("google")}
               className="w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:bg-slate-400"
             >
               Continue with Google
             </button>
             <button
-              disabled={!appleEnabled}
+              disabled={!availableProviders.apple}
               onClick={() => signIn("apple")}
               className="w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:bg-slate-400"
             >
               Continue with Apple
             </button>
           </div>
-          {(!googleEnabled || !appleEnabled) && (
-            <p className="mt-3 text-xs text-amber-700">Some providers are disabled until credentials are configured in env.</p>
+          {(!availableProviders.google || !availableProviders.apple) && (
+            <p className="mt-3 text-xs text-amber-700">Providers are not fully configured yet. Use "Configure OAuth on this server" below or server env setup.</p>
           )}
+          <button
+            onClick={runOAuthSetup}
+            className="mt-3 w-full rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-800"
+          >
+            Configure OAuth on this server
+          </button>
+          {setupMessage ? <p className="mt-2 text-xs text-slate-700">{setupMessage}</p> : null}
         </section>
       </main>
     );
@@ -427,8 +479,8 @@ export default function HomePage() {
             <h2 className="text-lg font-semibold">Identity</h2>
             <p className="mt-2 text-sm text-slate-700">Authenticated via OAuth session only. No local password login.</p>
             <div className="mt-3 flex flex-wrap gap-2">
-              <button onClick={() => signIn("google")} disabled={!googleEnabled} className="rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 disabled:bg-slate-100">Continue with Google</button>
-              <button onClick={() => signIn("apple")} disabled={!appleEnabled} className="rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 disabled:bg-slate-100">Continue with Apple</button>
+              <button onClick={() => signIn("google")} disabled={!availableProviders.google} className="rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 disabled:bg-slate-100">Continue with Google</button>
+              <button onClick={() => signIn("apple")} disabled={!availableProviders.apple} className="rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 disabled:bg-slate-100">Continue with Apple</button>
             </div>
           </article>
         </section>

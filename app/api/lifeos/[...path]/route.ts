@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { authOptions } from "../../../../lib/auth";
+import { buildAuthOptions } from "../../../../lib/auth";
 
 const API_BASE = process.env.LIFEOS_API_BASE_URL ?? "http://127.0.0.1:4000";
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
 
 async function proxy(request: NextRequest, path: string[]) {
-  const session = await getServerSession(authOptions);
+  const session = await getServerSession(buildAuthOptions());
   const actorEmail = session?.user?.email?.toLowerCase();
 
   if (!actorEmail) {
