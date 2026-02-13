@@ -3,11 +3,41 @@
 @tailwind utilities;
 
 :root {
-  --bg: #f5f3ef;
-  --fg: #131722;
+  --bg-top: #c7dcff;
+  --bg-mid: #eef3ff;
+  --bg-bottom: #f7fbff;
+  --text: #111827;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  min-height: 100%;
 }
 
 body {
-  background: radial-gradient(circle at top right, #f3dfc8 0%, var(--bg) 45%);
-  color: var(--fg);
+  font-family: var(--font-app), "Segoe UI", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(1200px 700px at 5% -20%, #b7d7ff 0%, transparent 60%),
+    radial-gradient(1100px 700px at 110% 10%, #e4ceff 0%, transparent 54%),
+    linear-gradient(180deg, var(--bg-top) 0%, var(--bg-mid) 38%, var(--bg-bottom) 100%);
+}
+
+input,
+textarea,
+button {
+  font: inherit;
+}
+
+button {
+  transition: transform 120ms ease, filter 120ms ease;
+}
+
+button:active {
+  transform: scale(0.98);
+  filter: brightness(0.98);
 }
