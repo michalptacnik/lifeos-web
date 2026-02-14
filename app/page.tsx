@@ -5,12 +5,14 @@ import { signIn, signOut, useSession } from "next-auth/react";
 
 type TaskStatus = "TODO" | "IN_PROCESS" | "DONE";
 type TabKey = "kanban" | "worktime";
-type AppView = "dashboard" | "tasks" | "calendar";
+type AppView = "dashboard" | "tasks" | "calendar" | "budget";
+type AreaKey = "HOME" | "BUDGET" | "WORK";
 
 type Task = {
   id: string;
   title: string;
   description: string | null;
+  area?: AreaKey | null;
   project: string | null;
   status: TaskStatus;
   startedOn: string | null;
@@ -33,7 +35,47 @@ type WorktimePayload = {
   recentSessions: WorkSession[];
 };
 
+type AutomationPlanItem = {
+  id: string;
+  title: string;
+  area: AreaKey;
+  project: string | null;
+  status: TaskStatus;
+  ownerEmail: string | null;
+  reason: string;
+};
+
+type AutomationActivityItem = {
+  id: string;
+  action: string;
+  payload: Record<string, unknown> | null;
+  createdAt: string;
+};
+
+type AutomationPlanResponse = {
+  mode: string;
+  selected: AutomationPlanItem[];
+  summary?: string;
+  changes?: Array<{
+    type: string;
+    taskId: string;
+    title: string;
+    before: { status: TaskStatus; startedOn: string | null };
+    after: { status: TaskStatus; startedOn: string | null };
+    reason: string;
+  }>;
+  applied?: { promotedTaskId: string | null } | null;
+  approvalRequired?: boolean;
+  message?: string;
+};
+
 const columns: TaskStatus[] = ["TODO", "IN_PROCESS", "DONE"];
+const areas: AreaKey[] = ["HOME", "BUDGET", "WORK"];
+const areaLabel: Record<AreaKey, string> = {
+  HOME: "Home",
+  BUDGET: "Budget",
+  WORK: "Work"
+};
 const statusMeta: Record<TaskStatus, { title: string; tone: string }> = {
   TODO: { title: "To Do", tone: "#d6e4ff" },
   IN_PROCESS: { title: "In Process", tone: "#ffe2bf" },
@@ -47,7 +89,8 @@ const bypassEmail = process.env.NEXT_PUBLIC_AUTH_BYPASS_EMAIL ?? "builder.local"
 const emptyTaskForm = {
   title: "",
   description: "",
-  project: "",
+  area: "WORK" as AreaKey,
+  projectName: "",
   ownerEmail: "",
   startedOn: "",
   finishedOn: ""
@@ -85,6 +128,18 @@ function isSameMonth(a: Date, b: Date) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
 }
 
+function decodeProject(areaValue: AreaKey | null | undefined, value: string | null): { area: AreaKey; projectName: string } {
+  if (areaValue && areas.includes(areaValue)) {
+    return { area: areaValue, projectName: value ?? "" };
+  }
+  if (!value) return { area: "WORK", projectName: "" };
+  const parts = value.split("::");
+  if (parts.length >= 2 && areas.includes(parts[0] as AreaKey)) {
+    return { area: parts[0] as AreaKey, projectName: parts.slice(1).join("::") };
+  }
+  return { area: "WORK", projectName: value };
+}
+
 export default function HomePage() {
   const { data: session, status } = useSession();
   const effectiveUserEmail = session?.user?.email ?? (authBypassEnabled ? bypassEmail : undefined);
@@ -100,6 +155,7 @@ export default function HomePage() {
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [editingValues, setEditingValues] = useState(emptyTaskForm);
+  const [activeAreaFilter, setActiveAreaFilter] = useState<"ALL" | AreaKey>("ALL");
   const [tick, setTick] = useState(Date.now());
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const now = new Date();
@@ -108,9 +164,19 @@ export default function HomePage() {
   const [selectedDate, setSelectedDate] = useState(() => startOfDay(new Date()));
   const [availableProviders, setAvailableProviders] = useState({ google: false, apple: false });
   const [setupMessage, setSetupMessage] = useState<string | null>(null);
+  const [automationActivity, setAutomationActivity] = useState<AutomationActivityItem[]>([]);
+  const [automationPreview, setAutomationPreview] = useState<AutomationPlanItem[] | null>(null);
+  const [automationSummary, setAutomationSummary] = useState<string | null>(null);
+  const [automationChanges, setAutomationChanges] = useState<AutomationPlanResponse["changes"]>(null);
+  const [automationBusy, setAutomationBusy] = useState(false);
+  const [automationArea, setAutomationArea] = useState<AreaKey>("WORK");
 
   const selectedTask = useMemo(() => tasks.find((t) => t.id === selectedTaskId) ?? null, [tasks, selectedTaskId]);
   const activeTask = worktime.activeSession?.task ?? selectedTask;
+  const visibleTasks = useMemo(() => {
+    if (activeAreaFilter === "ALL") return tasks;
+    return tasks.filter((task) => decodeProject(task.area, task.project).area === activeAreaFilter);
+  }, [tasks, activeAreaFilter]);
   const calendarDays = useMemo(() => {
     const firstOfMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1);
     const lastOfMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0);
@@ -126,12 +192,55 @@ export default function HomePage() {
     return days;
   }, [calendarMonth]);
   const selectedDateTasks = useMemo(() => {
-    return tasks.filter((task) => {
+    return visibleTasks.filter((task) => {
       const startedOn = task.startedOn ? startOfDay(new Date(task.startedOn)) : null;
       const finishedOn = task.finishedOn ? startOfDay(new Date(task.finishedOn)) : null;
       return Boolean((startedOn && isSameDay(startedOn, selectedDate)) || (finishedOn && isSameDay(finishedOn, selectedDate)));
     });
-  }, [tasks, selectedDate]);
+  }, [visibleTasks, selectedDate]);
+  const recentProjects = useMemo(() => {
+    const map = new Map<string, { area: AreaKey; projectName: string; total: number; done: number; lastActivity: number }>();
+    for (const task of tasks) {
+      const decoded = decodeProject(task.area, task.project);
+      if (!decoded.projectName) continue;
+      const key = `${decoded.area}::${decoded.projectName}`;
+      const existing = map.get(key) ?? { area: decoded.area, projectName: decoded.projectName, total: 0, done: 0, lastActivity: 0 };
+      existing.total += 1;
+      if (task.status === "DONE") existing.done += 1;
+      const activityDate = task.finishedOn ?? task.startedOn ?? task.createdAt;
+      existing.lastActivity = Math.max(existing.lastActivity, new Date(activityDate).getTime());
+      map.set(key, existing);
+    }
+    return Array.from(map.values()).sort((a, b) => b.lastActivity - a.lastActivity).slice(0, 5);
+  }, [tasks]);
+  const areaStats = useMemo(() => {
+    return areas.map((area) => {
+      const list = tasks.filter((task) => decodeProject(task.area, task.project).area === area);
+      const done = list.filter((task) => task.status === "DONE").length;
+      const inProcess = list.filter((task) => task.status === "IN_PROCESS").length;
+      return { area, total: list.length, done, inProcess };
+    });
+  }, [tasks]);
+  const todayTasks = useMemo(() => {
+    const today = startOfDay(new Date());
+    return tasks.filter((task) => {
+      const startedOn = task.startedOn ? startOfDay(new Date(task.startedOn)) : null;
+      const finishedOn = task.finishedOn ? startOfDay(new Date(task.finishedOn)) : null;
+      return Boolean((startedOn && isSameDay(startedOn, today)) || (finishedOn && isSameDay(finishedOn, today)));
+    });
+  }, [tasks]);
+  const budgetProjects = useMemo(() => {
+    const map = new Map<string, { name: string; total: number; done: number }>();
+    for (const task of tasks) {
+      const decoded = decodeProject(task.area, task.project);
+      if (decoded.area !== "BUDGET" || !decoded.projectName) continue;
+      const existing = map.get(decoded.projectName) ?? { name: decoded.projectName, total: 0, done: 0 };
+      existing.total += 1;
+      if (task.status === "DONE") existing.done += 1;
+      map.set(decoded.projectName, existing);
+    }
+    return Array.from(map.values()).sort((a, b) => b.total - a.total);
+  }, [tasks]);
 
   async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(`/api/lifeos${path}`, {
@@ -156,9 +265,14 @@ export default function HomePage() {
     setLoading(true);
     setError(null);
     try {
-      const [tasksData, worktimeData] = await Promise.all([api<Task[]>("/tasks"), api<WorktimePayload>("/worktime")]);
+      const [tasksData, worktimeData, activityData] = await Promise.all([
+        api<Task[]>("/tasks"),
+        api<WorktimePayload>("/worktime"),
+        api<AutomationActivityItem[]>("/automation/activity").catch(() => [])
+      ]);
       setTasks(tasksData);
       setWorktime(worktimeData);
+      setAutomationActivity(activityData);
       setTaskForm((prev) => ({ ...prev, ownerEmail: prev.ownerEmail || effectiveUserEmail || "" }));
     } catch (err) {
       setError((err as Error).message);
@@ -203,7 +317,8 @@ export default function HomePage() {
         body: JSON.stringify({
           title: taskForm.title,
           description: taskForm.description || null,
-          project: taskForm.project || null,
+          area: taskForm.area,
+          project: taskForm.projectName.trim() || null,
           ownerEmail: taskForm.ownerEmail || effectiveUserEmail || null,
           startedOn: taskForm.startedOn ? new Date(taskForm.startedOn).toISOString() : null,
           finishedOn: taskForm.finishedOn ? new Date(taskForm.finishedOn).toISOString() : null,
@@ -219,11 +334,13 @@ export default function HomePage() {
   }
 
   function beginEdit(task: Task) {
+    const decoded = decodeProject(task.area, task.project);
     setEditingTask(task);
     setEditingValues({
       title: task.title,
       description: task.description ?? "",
-      project: task.project ?? "",
+      area: decoded.area,
+      projectName: decoded.projectName,
       ownerEmail: task.ownerEmail ?? effectiveUserEmail ?? "",
       startedOn: toInputDate(task.startedOn),
       finishedOn: toInputDate(task.finishedOn)
@@ -240,7 +357,8 @@ export default function HomePage() {
         body: JSON.stringify({
           title: editingValues.title,
           description: editingValues.description || null,
-          project: editingValues.project || null,
+          area: editingValues.area,
+          project: editingValues.projectName.trim() || null,
           ownerEmail: editingValues.ownerEmail || null,
           startedOn: editingValues.startedOn ? new Date(editingValues.startedOn).toISOString() : null,
           finishedOn: editingValues.finishedOn ? new Date(editingValues.finishedOn).toISOString() : null
@@ -353,6 +471,33 @@ export default function HomePage() {
     setCalendarMonth(new Date(today.getFullYear(), today.getMonth(), 1));
   }
 
+  async function runPlanDay(mode: "dry_run" | "apply") {
+    setAutomationBusy(true);
+    try {
+      const shouldConfirmBudget = mode === "apply" && automationArea === "BUDGET";
+      if (shouldConfirmBudget) {
+        const ok = window.confirm("Apply automation for Budget area? This requires explicit approval.");
+        if (!ok) {
+          setAutomationBusy(false);
+          return;
+        }
+      }
+
+      const payload = await api<AutomationPlanResponse>("/automation/plan-day", {
+        method: "POST",
+        body: JSON.stringify({ mode, area: automationArea, limit: 5, confirmBudgetApply: shouldConfirmBudget })
+      });
+      setAutomationPreview(payload.selected);
+      setAutomationSummary(payload.summary ?? null);
+      setAutomationChanges(payload.changes ?? null);
+      await refreshAll();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setAutomationBusy(false);
+    }
+  }
+
   if (status === "loading") {
     return <main className="mx-auto max-w-5xl px-4 py-8">Loading session...</main>;
   }
@@ -416,20 +561,30 @@ export default function HomePage() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">LifeOS App</p>
-                <h1 className="text-2xl font-semibold text-slate-900">{view === "tasks" ? "Work / Tasks" : "Calendar"}</h1>
+                <h1 className="text-2xl font-semibold text-slate-900">{view === "tasks" ? "Work / Tasks" : view === "calendar" ? "Calendar" : "Budget"}</h1>
               </div>
               <div className="flex gap-2">
                 {view === "tasks" ? <button onClick={() => setCreateOpen(true)} className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white">+ Task</button> : null}
                 <button onClick={() => setView("dashboard")} className="rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-800">Back to Dashboard</button>
               </div>
             </div>
-            {view === "tasks" ? (
+          {view === "tasks" ? (
               <div className="mt-3 grid grid-cols-2 gap-2">
               {(["kanban", "worktime"] as TabKey[]).map((t) => (
                 <button key={t} onClick={() => setTab(t)} className={`rounded-2xl px-3 py-2 text-sm font-semibold ${tab === t ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"}`}>
                   {t === "kanban" ? "Kanban" : "Worktime"}
                 </button>
               ))}
+              </div>
+            ) : null}
+            {view === "tasks" ? (
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button onClick={() => setActiveAreaFilter("ALL")} className={`rounded-full px-3 py-1 text-xs font-semibold ${activeAreaFilter === "ALL" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"}`}>All Areas</button>
+                {areas.map((area) => (
+                  <button key={area} onClick={() => setActiveAreaFilter(area)} className={`rounded-full px-3 py-1 text-xs font-semibold ${activeAreaFilter === area ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"}`}>
+                    {areaLabel[area]}
+                  </button>
+                ))}
               </div>
             ) : null}
           </>
@@ -440,19 +595,36 @@ export default function HomePage() {
         <section className="mt-4 space-y-4">
           <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
             <h2 className="text-lg font-semibold text-slate-900">Widgets</h2>
-            <p className="mt-1 text-sm text-slate-600">Widget area is reserved. We can plug real widgets in next.</p>
+            <p className="mt-1 text-sm text-slate-600">Live snapshot from your current system.</p>
             <div className="mt-3 grid gap-3 md:grid-cols-3">
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4">
-                <p className="text-sm font-semibold text-slate-700">Focus Widget</p>
-                <p className="mt-1 text-xs text-slate-500">Placeholder</p>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-sm font-semibold text-slate-700">Today Focus</p>
+                <p className="mt-1 text-xs text-slate-500">Tasks touching today: {todayTasks.length}</p>
+                <p className="mt-2 text-xs text-slate-600">Active session: {worktime.activeSession ? worktime.activeSession.task.title : "None"}</p>
               </div>
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4">
-                <p className="text-sm font-semibold text-slate-700">Daily Brief</p>
-                <p className="mt-1 text-xs text-slate-500">Placeholder</p>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-sm font-semibold text-slate-700">Area Overview</p>
+                <div className="mt-2 space-y-1">
+                  {areaStats.map((stat) => (
+                    <p key={stat.area} className="text-xs text-slate-600">
+                      {areaLabel[stat.area]}: {stat.total} tasks ({stat.done} done, {stat.inProcess} active)
+                    </p>
+                  ))}
+                </div>
               </div>
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4">
-                <p className="text-sm font-semibold text-slate-700">Upcoming</p>
-                <p className="mt-1 text-xs text-slate-500">Placeholder</p>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-sm font-semibold text-slate-700">Recent Projects</p>
+                <div className="mt-2 space-y-1">
+                  {recentProjects.length === 0 ? (
+                    <p className="text-xs text-slate-500">No projects yet.</p>
+                  ) : (
+                    recentProjects.map((project) => (
+                      <p key={`${project.area}-${project.projectName}`} className="text-xs text-slate-600">
+                        {areaLabel[project.area]} / {project.projectName}: {project.done}/{project.total} done
+                      </p>
+                    ))
+                  )}
+                </div>
               </div>
             </div>
           </article>
@@ -482,13 +654,76 @@ export default function HomePage() {
                 </div>
                 <span className="text-xs font-medium text-slate-700">Calendar</span>
               </button>
+              <button
+                onClick={() => setView("budget")}
+                className="group flex flex-col items-center gap-2 text-center"
+              >
+                <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-600 text-lg font-bold text-white shadow-md transition group-hover:scale-105">
+                  B
+                </div>
+                <span className="text-xs font-medium text-slate-700">Budget</span>
+              </button>
               <div className="flex flex-col items-center gap-2 text-center opacity-70">
                 <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-100 text-lg font-bold text-slate-500">+</div>
                 <span className="text-xs font-medium text-slate-600">Empty</span>
               </div>
-              <div className="flex flex-col items-center gap-2 text-center opacity-70">
-                <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-100 text-lg font-bold text-slate-500">+</div>
-                <span className="text-xs font-medium text-slate-600">Empty</span>
+            </div>
+          </article>
+
+          <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-lg font-semibold text-slate-900">Automation</h2>
+              <div className="flex gap-2">
+                <button disabled={automationBusy} onClick={() => runPlanDay("dry_run")} className="rounded-full bg-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-800 disabled:opacity-60">Preview Plan</button>
+                <button disabled={automationBusy} onClick={() => runPlanDay("apply")} className="rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60">Apply Plan</button>
+              </div>
+            </div>
+            <p className="mt-1 text-sm text-slate-600">Agent-ready operation surface with audit trail.</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {areas.map((area) => (
+                <button key={area} onClick={() => setAutomationArea(area)} className={`rounded-full px-3 py-1 text-xs font-semibold ${automationArea === area ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"}`}>
+                  {areaLabel[area]}
+                </button>
+              ))}
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Latest Plan</p>
+                {automationSummary ? <p className="mt-1 text-xs text-slate-600">{automationSummary}</p> : null}
+                <div className="mt-2 space-y-1">
+                  {!automationPreview || automationPreview.length === 0 ? (
+                    <p className="text-xs text-slate-500">No plan preview yet.</p>
+                  ) : (
+                    automationPreview.slice(0, 4).map((item) => (
+                      <p key={item.id} className="text-xs text-slate-700">
+                        {areaLabel[item.area]} / {item.project || "-"}: {item.title}
+                      </p>
+                    ))
+                  )}
+                </div>
+                {automationChanges && automationChanges.length > 0 ? (
+                  <div className="mt-2 rounded-lg bg-slate-50 p-2">
+                    {automationChanges.map((change) => (
+                      <p key={change.taskId} className="text-xs text-slate-700">
+                        Change: {change.title} ({change.before.status} to {change.after.status})
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Recent Activity</p>
+                <div className="mt-2 space-y-1">
+                  {automationActivity.length === 0 ? (
+                    <p className="text-xs text-slate-500">No automation events yet.</p>
+                  ) : (
+                    automationActivity.slice(0, 4).map((event) => (
+                      <p key={event.id} className="text-xs text-slate-700">
+                        {new Date(event.createdAt).toLocaleTimeString()} - {event.action}
+                      </p>
+                    ))
+                  )}
+                </div>
               </div>
             </div>
           </article>
@@ -501,7 +736,7 @@ export default function HomePage() {
             <section className="mt-4 space-y-4">
               <div className="flex snap-x gap-3 overflow-x-auto pb-1 md:grid md:grid-cols-3 md:overflow-visible">
                 {columns.map((statusKey) => {
-                  const list = tasks.filter((task) => task.status === statusKey);
+                  const list = visibleTasks.filter((task) => task.status === statusKey);
                   return (
                     <article
                       key={statusKey}
@@ -517,6 +752,9 @@ export default function HomePage() {
                       </div>
                       <div className="space-y-2">
                         {list.map((task) => (
+                          (() => {
+                            const decoded = decodeProject(task.area, task.project);
+                            return (
                           <article
                             key={task.id}
                             draggable
@@ -527,7 +765,8 @@ export default function HomePage() {
                           >
                             <button onClick={() => setSelectedTaskId(task.id)} className="w-full text-left">
                               <p className="text-base font-semibold">{task.title}</p>
-                              <p className="mt-1 text-xs text-slate-600">Project: {task.project || "-"}</p>
+                              <p className="mt-1 text-xs text-slate-600">Area: {areaLabel[decoded.area]}</p>
+                              <p className="text-xs text-slate-600">Project: {decoded.projectName || "-"}</p>
                               <p className="text-xs text-slate-600">Owner: {task.ownerEmail || "-"}</p>
                               <p className="text-xs text-slate-600">Started: {fmt(task.startedOn)}</p>
                               <p className="text-xs text-slate-600">Finished: {fmt(task.finishedOn)}</p>
@@ -542,6 +781,8 @@ export default function HomePage() {
                               <button onClick={() => deleteTask(task.id)} className="rounded-full bg-rose-200 px-3 py-1 text-xs text-rose-900">Delete</button>
                             </div>
                           </article>
+                            );
+                          })()
                         ))}
                       </div>
                     </article>
@@ -550,15 +791,21 @@ export default function HomePage() {
               </div>
 
               {selectedTask ? (
+                (() => {
+                  const decoded = decodeProject(selectedTask.area, selectedTask.project);
+                  return (
                 <section className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
                   <h3 className="text-lg font-semibold">Selected Task</h3>
                   <p className="mt-2 text-sm text-slate-700">{selectedTask.title}</p>
-                  <p className="text-sm text-slate-600">Project: {selectedTask.project || "-"}</p>
+                  <p className="text-sm text-slate-600">Area: {areaLabel[decoded.area]}</p>
+                  <p className="text-sm text-slate-600">Project: {decoded.projectName || "-"}</p>
                   <p className="text-sm text-slate-600">Owner: {selectedTask.ownerEmail || "-"}</p>
                   <p className="text-sm text-slate-600">Started: {fmt(selectedTask.startedOn)}</p>
                   <p className="text-sm text-slate-600">Finished: {fmt(selectedTask.finishedOn)}</p>
                   <p className="mt-2 text-sm text-slate-600">Description: {selectedTask.description || "-"}</p>
                 </section>
+                  );
+                })()
               ) : null}
             </section>
           )}
@@ -580,7 +827,7 @@ export default function HomePage() {
               <article className="rounded-3xl bg-slate-900 p-4 text-white shadow-[0_10px_28px_rgba(15,23,42,0.45)]">
                 <h2 className="text-sm font-semibold uppercase tracking-[0.1em] text-slate-300">Middle: Active Task</h2>
                 <p className="mt-2 text-lg font-semibold">{activeTask?.title ?? "Pick task from queue"}</p>
-                <p className="text-sm text-slate-300">Project: {activeTask?.project || "-"}</p>
+                <p className="text-sm text-slate-300">Project: {activeTask ? decodeProject(activeTask.area, activeTask.project).projectName || "-" : "-"}</p>
                 <p className="mt-3 text-3xl font-semibold tabular-nums">{worktime.activeSession ? timerLabel(worktime.activeSession.startedAt, tick) : "00:00:00"}</p>
                 {worktime.activeSession ? (
                   <button onClick={stopWork} className="mt-3 rounded-full bg-rose-500 px-4 py-2 text-sm font-semibold text-white">Stop Work</button>
@@ -674,13 +921,19 @@ export default function HomePage() {
                     <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">No tasks mapped to this day yet.</p>
                   ) : (
                     selectedDateTasks.map((task) => (
+                      (() => {
+                        const decoded = decodeProject(task.area, task.project);
+                        return (
                       <div key={task.id} className="rounded-xl border border-slate-200 bg-white p-3">
                         <p className="text-sm font-semibold text-slate-800">{task.title}</p>
-                        <p className="text-xs text-slate-600">Project: {task.project || "-"}</p>
+                        <p className="text-xs text-slate-600">Area: {areaLabel[decoded.area]}</p>
+                        <p className="text-xs text-slate-600">Project: {decoded.projectName || "-"}</p>
                         <p className="text-xs text-slate-600">Status: {statusMeta[task.status].title}</p>
                         <p className="text-xs text-slate-600">Start: {fmt(task.startedOn)}</p>
                         <p className="text-xs text-slate-600">Finish: {fmt(task.finishedOn)}</p>
                       </div>
+                        );
+                      })()
                     ))
                   )}
                 </div>
@@ -693,6 +946,36 @@ export default function HomePage() {
               </article>
             </section>
           )}
+
+          {view === "budget" && (
+            <section className="mt-4 grid gap-3 lg:grid-cols-[2fr_1fr]">
+              <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
+                <h2 className="text-lg font-semibold">Budget Projects</h2>
+                <p className="mt-1 text-sm text-slate-700">Project-first budget workspace. Cashflow modules plug in next.</p>
+                <div className="mt-3 space-y-2">
+                  {budgetProjects.length === 0 ? (
+                    <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">No Budget projects yet. Create tasks in Area: Budget to seed this list.</p>
+                  ) : (
+                    budgetProjects.map((project) => (
+                      <div key={project.name} className="rounded-xl border border-slate-200 bg-white p-3">
+                        <p className="text-sm font-semibold text-slate-800">{project.name}</p>
+                        <p className="text-xs text-slate-600">{project.done}/{project.total} tasks completed</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </article>
+              <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
+                <h2 className="text-lg font-semibold">Budget Modules (Next)</h2>
+                <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                  <li>Accounts</li>
+                  <li>Cashflow entries</li>
+                  <li>Forecast and runway</li>
+                  <li>Household vs business split</li>
+                </ul>
+              </article>
+            </section>
+          )}
         </>
       )}
 
@@ -702,7 +985,10 @@ export default function HomePage() {
             <h3 className="mb-3 text-lg font-semibold">Create Task</h3>
             <div className="grid gap-2 md:grid-cols-2">
               <input required value={taskForm.title} onChange={(e) => setTaskForm((p) => ({ ...p, title: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2" placeholder="Task title" />
-              <input value={taskForm.project} onChange={(e) => setTaskForm((p) => ({ ...p, project: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2" placeholder="Project" />
+              <select value={taskForm.area} onChange={(e) => setTaskForm((p) => ({ ...p, area: e.target.value as AreaKey }))} className="rounded-xl border border-slate-300 px-3 py-2">
+                {areas.map((area) => <option key={area} value={area}>{areaLabel[area]}</option>)}
+              </select>
+              <input value={taskForm.projectName} onChange={(e) => setTaskForm((p) => ({ ...p, projectName: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2" placeholder="Project name" />
               <input type="email" value={taskForm.ownerEmail} onChange={(e) => setTaskForm((p) => ({ ...p, ownerEmail: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2" placeholder="Owner email" />
               <textarea value={taskForm.description} onChange={(e) => setTaskForm((p) => ({ ...p, description: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2 md:col-span-2" placeholder="Description" rows={2} />
               <label className="text-sm text-slate-700">Started on
@@ -726,7 +1012,10 @@ export default function HomePage() {
             <h3 className="mb-3 text-lg font-semibold">Edit Task</h3>
             <div className="grid gap-2 md:grid-cols-2">
               <input required value={editingValues.title} onChange={(e) => setEditingValues((p) => ({ ...p, title: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2" />
-              <input value={editingValues.project} onChange={(e) => setEditingValues((p) => ({ ...p, project: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2" />
+              <select value={editingValues.area} onChange={(e) => setEditingValues((p) => ({ ...p, area: e.target.value as AreaKey }))} className="rounded-xl border border-slate-300 px-3 py-2">
+                {areas.map((area) => <option key={area} value={area}>{areaLabel[area]}</option>)}
+              </select>
+              <input value={editingValues.projectName} onChange={(e) => setEditingValues((p) => ({ ...p, projectName: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2" />
               <input type="email" value={editingValues.ownerEmail} onChange={(e) => setEditingValues((p) => ({ ...p, ownerEmail: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2" />
               <textarea value={editingValues.description} onChange={(e) => setEditingValues((p) => ({ ...p, description: e.target.value }))} className="rounded-xl border border-slate-300 px-3 py-2 md:col-span-2" rows={2} />
               <label className="text-sm text-slate-700">Started on
