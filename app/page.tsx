@@ -5,8 +5,22 @@ import { signIn, signOut, useSession } from "next-auth/react";
 
 type TaskStatus = "TODO" | "IN_PROCESS" | "DONE";
 type TabKey = "kanban" | "worktime";
-type AppView = "dashboard" | "tasks" | "calendar" | "budget";
+type AppView = "dashboard" | "tasks" | "calendar";
 type AreaKey = "HOME" | "BUDGET" | "WORK";
+type AuthMode = "login" | "register";
+type ResourceKey = "tasks" | "worktime" | "automation";
+type SessionProfile = {
+  user: {
+    id: string;
+    email: string;
+    displayName: string | null;
+  };
+  household: {
+    id: string;
+    name: string;
+    role: "OWNER" | "MANAGER" | "VIEWER";
+  } | null;
+};
 
 type Task = {
   id: string;
@@ -82,10 +96,6 @@ const statusMeta: Record<TaskStatus, { title: string; tone: string }> = {
   DONE: { title: "Done", tone: "#c6f2d0" }
 };
 
-
-const authBypassEnabled = process.env.NEXT_PUBLIC_AUTH_BYPASS === "true";
-const bypassEmail = process.env.NEXT_PUBLIC_AUTH_BYPASS_EMAIL ?? "builder.local";
-
 const emptyTaskForm = {
   title: "",
   description: "",
@@ -142,7 +152,8 @@ function decodeProject(areaValue: AreaKey | null | undefined, value: string | nu
 
 export default function HomePage() {
   const { data: session, status } = useSession();
-  const effectiveUserEmail = session?.user?.email ?? (authBypassEnabled ? bypassEmail : undefined);
+  const [profile, setProfile] = useState<SessionProfile | null>(null);
+  const effectiveUserEmail = profile?.user?.email ?? session?.user?.email;
   const [view, setView] = useState<AppView>("dashboard");
   const [tab, setTab] = useState<TabKey>("kanban");
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -164,10 +175,16 @@ export default function HomePage() {
   const [selectedDate, setSelectedDate] = useState(() => startOfDay(new Date()));
   const [availableProviders, setAvailableProviders] = useState({ google: false, apple: false });
   const [setupMessage, setSetupMessage] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authDisplayName, setAuthDisplayName] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [automationActivity, setAutomationActivity] = useState<AutomationActivityItem[]>([]);
   const [automationPreview, setAutomationPreview] = useState<AutomationPlanItem[] | null>(null);
   const [automationSummary, setAutomationSummary] = useState<string | null>(null);
-  const [automationChanges, setAutomationChanges] = useState<AutomationPlanResponse["changes"]>(null);
+  const [automationChanges, setAutomationChanges] = useState<NonNullable<AutomationPlanResponse["changes"]> | null>(null);
   const [automationBusy, setAutomationBusy] = useState(false);
   const [automationArea, setAutomationArea] = useState<AreaKey>("WORK");
 
@@ -229,19 +246,6 @@ export default function HomePage() {
       return Boolean((startedOn && isSameDay(startedOn, today)) || (finishedOn && isSameDay(finishedOn, today)));
     });
   }, [tasks]);
-  const budgetProjects = useMemo(() => {
-    const map = new Map<string, { name: string; total: number; done: number }>();
-    for (const task of tasks) {
-      const decoded = decodeProject(task.area, task.project);
-      if (decoded.area !== "BUDGET" || !decoded.projectName) continue;
-      const existing = map.get(decoded.projectName) ?? { name: decoded.projectName, total: 0, done: 0 };
-      existing.total += 1;
-      if (task.status === "DONE") existing.done += 1;
-      map.set(decoded.projectName, existing);
-    }
-    return Array.from(map.values()).sort((a, b) => b.total - a.total);
-  }, [tasks]);
-
   async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(`/api/lifeos${path}`, {
       ...init,
@@ -256,34 +260,70 @@ export default function HomePage() {
     return payload as T;
   }
 
-  async function refreshAll() {
+  async function loadResources(resources: ResourceKey[], options?: { showLoading?: boolean }) {
     if (!effectiveUserEmail) {
       setLoading(false);
       return;
     }
 
-    setLoading(true);
+    if (options?.showLoading) {
+      setLoading(true);
+    }
     setError(null);
     try {
-      const [tasksData, worktimeData, activityData] = await Promise.all([
-        api<Task[]>("/tasks"),
-        api<WorktimePayload>("/worktime"),
-        api<AutomationActivityItem[]>("/automation/activity").catch(() => [])
-      ]);
-      setTasks(tasksData);
-      setWorktime(worktimeData);
-      setAutomationActivity(activityData);
-      setTaskForm((prev) => ({ ...prev, ownerEmail: prev.ownerEmail || effectiveUserEmail || "" }));
+      const tasksPromise = resources.includes("tasks") ? api<Task[]>("/tasks") : Promise.resolve(null);
+      const worktimePromise = resources.includes("worktime") ? api<WorktimePayload>("/worktime") : Promise.resolve(null);
+      const automationPromise = resources.includes("automation")
+        ? api<AutomationActivityItem[]>("/automation/activity").catch(() => [])
+        : Promise.resolve(null);
+
+      const [tasksData, worktimeData, activityData] = await Promise.all([tasksPromise, worktimePromise, automationPromise]);
+
+      if (tasksData) {
+        setTasks(tasksData);
+        setTaskForm((prev) => ({ ...prev, ownerEmail: prev.ownerEmail || effectiveUserEmail || "" }));
+      }
+      if (worktimeData) {
+        setWorktime(worktimeData);
+      }
+      if (activityData) {
+        setAutomationActivity(activityData);
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setLoading(false);
+      if (options?.showLoading) {
+        setLoading(false);
+      }
     }
   }
 
+  function invalidate(...resources: ResourceKey[]) {
+    void loadResources(resources, { showLoading: false });
+  }
+
   useEffect(() => {
-    refreshAll();
+    void loadResources(["tasks", "worktime", "automation"], { showLoading: true });
   }, [effectiveUserEmail]);
+
+  useEffect(() => {
+    if (!session?.user?.email) {
+      setProfile(null);
+      return;
+    }
+
+    const loadProfile = async () => {
+      try {
+        const res = await fetch("/api/session/profile", { cache: "no-store" });
+        if (!res.ok) return;
+        const payload = (await res.json()) as SessionProfile;
+        setProfile(payload);
+      } catch {
+      }
+    };
+
+    void loadProfile();
+  }, [session?.user?.email]);
 
   useEffect(() => {
     const loadProviders = async () => {
@@ -312,7 +352,7 @@ export default function HomePage() {
     event.preventDefault();
     setError(null);
     try {
-      await api<Task>("/tasks", {
+      const created = await api<Task>("/tasks", {
         method: "POST",
         body: JSON.stringify({
           title: taskForm.title,
@@ -325,9 +365,10 @@ export default function HomePage() {
           status: "TODO"
         })
       });
+      setTasks((prev) => [created, ...prev.filter((task) => task.id !== created.id)]);
       setTaskForm({ ...emptyTaskForm, ownerEmail: effectiveUserEmail || "" });
       setCreateOpen(false);
-      await refreshAll();
+      invalidate("tasks");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -352,7 +393,7 @@ export default function HomePage() {
     if (!editingTask) return;
     setError(null);
     try {
-      await api<Task>(`/tasks/${editingTask.id}`, {
+      const updated = await api<Task>(`/tasks/${editingTask.id}`, {
         method: "PATCH",
         body: JSON.stringify({
           title: editingValues.title,
@@ -364,8 +405,9 @@ export default function HomePage() {
           finishedOn: editingValues.finishedOn ? new Date(editingValues.finishedOn).toISOString() : null
         })
       });
+      setTasks((prev) => prev.map((task) => (task.id === updated.id ? updated : task)));
       setEditingTask(null);
-      await refreshAll();
+      invalidate("tasks", "worktime");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -373,11 +415,14 @@ export default function HomePage() {
 
   async function moveTask(taskId: string, status: TaskStatus) {
     setError(null);
+    const prevTasks = tasks;
+    setTasks((list) => list.map((task) => (task.id === taskId ? { ...task, status } : task)));
     try {
       await api<Task>(`/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify({ status }) });
       setDraggingTaskId(null);
-      await refreshAll();
+      invalidate("tasks", "worktime");
     } catch (err) {
+      setTasks(prevTasks);
       setError((err as Error).message);
     }
   }
@@ -398,11 +443,14 @@ export default function HomePage() {
 
   async function deleteTask(taskId: string) {
     setError(null);
+    const prevTasks = tasks;
+    setTasks((list) => list.filter((task) => task.id !== taskId));
     try {
       await api(`/tasks/${taskId}`, { method: "DELETE" });
       if (selectedTaskId === taskId) setSelectedTaskId(null);
-      await refreshAll();
+      invalidate("tasks", "worktime");
     } catch (err) {
+      setTasks(prevTasks);
       setError((err as Error).message);
     }
   }
@@ -412,7 +460,7 @@ export default function HomePage() {
     setError(null);
     try {
       await api<WorkSession>("/worktime/start", { method: "POST", body: JSON.stringify({ taskId: activeTask.id }) });
-      await refreshAll();
+      invalidate("worktime", "tasks");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -422,7 +470,7 @@ export default function HomePage() {
     setError(null);
     try {
       await api<WorkSession>("/worktime/stop", { method: "POST", body: JSON.stringify({}) });
-      await refreshAll();
+      invalidate("worktime", "tasks");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -431,7 +479,7 @@ export default function HomePage() {
   async function saveSessionNote(sessionId: string, notes: string) {
     try {
       await api<WorkSession>("/worktime/" + sessionId, { method: "PATCH", body: JSON.stringify({ notes }) });
-      await refreshAll();
+      invalidate("worktime");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -465,6 +513,72 @@ export default function HomePage() {
     setSetupMessage("OAuth credentials saved. You can sign in now.");
   }
 
+  async function submitLocalAuth(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = authEmail.trim().toLowerCase();
+    const password = authPassword;
+    if (!email || !password) {
+      setAuthMessage("Email and password are required.");
+      return;
+    }
+
+    setAuthBusy(true);
+    setAuthMessage(null);
+    try {
+      const csrfRes = await fetch("/api/auth/csrf", { cache: "no-store" });
+      const csrfPayload = (await csrfRes.json()) as { csrfToken?: string };
+      const csrfToken = csrfPayload.csrfToken;
+      if (!csrfToken) {
+        throw new Error("Unable to establish secure auth session");
+      }
+
+      const authEndpoint = authMode === "register" ? "/api/local-auth/register" : "/api/local-auth/login";
+      const authRes = await fetch(authEndpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-csrf-token": csrfToken
+        },
+        body: JSON.stringify({
+          email,
+          password,
+          displayName: authMode === "register" ? (authDisplayName.trim() || undefined) : undefined
+        })
+      });
+
+      const authRaw = await authRes.text();
+      const authPayload = authRaw ? JSON.parse(authRaw) : {};
+      if (!authRes.ok) {
+        if (authRes.status === 409) {
+          throw new Error("Account already exists. Switch to Login.");
+        }
+        if (authRes.status === 429) {
+          const retryAfterSeconds = Number(authPayload.retryAfterSeconds ?? 0);
+          if (retryAfterSeconds > 0) {
+            const minutes = Math.ceil(retryAfterSeconds / 60);
+            throw new Error(`Too many attempts. Try again in about ${minutes} minute(s).`);
+          }
+          throw new Error("Too many attempts. Try again later.");
+        }
+        if (authRes.status === 401) {
+          throw new Error("Wrong email or password.");
+        }
+        throw new Error(authPayload.message ?? (authMode === "register" ? "Registration failed" : "Login failed"));
+      }
+
+      const result = await signIn("credentials", { email, password, csrfToken, redirect: false });
+      if (result?.error) {
+        throw new Error("Login failed. Please retry.");
+      }
+      setAuthPassword("");
+      setAuthMessage("Signed in.");
+    } catch (err) {
+      setAuthMessage((err as Error).message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   function jumpToToday() {
     const today = startOfDay(new Date());
     setSelectedDate(today);
@@ -490,7 +604,7 @@ export default function HomePage() {
       setAutomationPreview(payload.selected);
       setAutomationSummary(payload.summary ?? null);
       setAutomationChanges(payload.changes ?? null);
-      await refreshAll();
+      invalidate("tasks", "worktime", "automation");
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -502,39 +616,94 @@ export default function HomePage() {
     return <main className="mx-auto max-w-5xl px-4 py-8">Loading session...</main>;
   }
 
-  if (status === "unauthenticated" && !authBypassEnabled) {
+  if (status === "unauthenticated") {
     return (
       <main className="mx-auto max-w-md px-4 py-12">
         <section className="rounded-3xl border border-white/80 bg-white/92 p-6 shadow-[0_16px_36px_rgba(45,74,110,0.18)]">
           <p className="text-xs uppercase tracking-[0.18em] text-slate-500">LifeOS</p>
           <h1 className="mt-2 text-2xl font-semibold text-slate-900">Sign in</h1>
-          <p className="mt-2 text-sm text-slate-700">Use SSO only. Email/password login is disabled.</p>
-          <div className="mt-5 space-y-2">
+          <p className="mt-2 text-sm text-slate-700">Email and password first. SSO is optional.</p>
+
+          <div className="mt-4 grid grid-cols-2 gap-2 rounded-full bg-slate-100 p-1">
             <button
-              disabled={!availableProviders.google}
-              onClick={() => signIn("google")}
-              className="w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:bg-slate-400"
+              onClick={() => setAuthMode("login")}
+              className={`rounded-full px-3 py-1.5 text-sm font-semibold ${authMode === "login" ? "bg-slate-900 text-white" : "text-slate-700"}`}
             >
-              Continue with Google
+              Login
             </button>
             <button
-              disabled={!availableProviders.apple}
-              onClick={() => signIn("apple")}
-              className="w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:bg-slate-400"
+              onClick={() => setAuthMode("register")}
+              className={`rounded-full px-3 py-1.5 text-sm font-semibold ${authMode === "register" ? "bg-slate-900 text-white" : "text-slate-700"}`}
             >
-              Continue with Apple
+              Register
             </button>
           </div>
-          {(!availableProviders.google || !availableProviders.apple) && (
-            <p className="mt-3 text-xs text-amber-700">Providers are not fully configured yet. Use "Configure OAuth on this server" below or server env setup.</p>
-          )}
-          <button
-            onClick={runOAuthSetup}
-            className="mt-3 w-full rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-800"
-          >
-            Configure OAuth on this server
-          </button>
-          {setupMessage ? <p className="mt-2 text-xs text-slate-700">{setupMessage}</p> : null}
+
+          <form onSubmit={submitLocalAuth} className="mt-4 space-y-2">
+            {authMode === "register" ? (
+              <input
+                type="text"
+                value={authDisplayName}
+                onChange={(e) => setAuthDisplayName(e.target.value)}
+                placeholder="Display name"
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+              />
+            ) : null}
+            <input
+              type="email"
+              value={authEmail}
+              onChange={(e) => setAuthEmail(e.target.value)}
+              placeholder="Email"
+              className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+              required
+            />
+            <input
+              type="password"
+              value={authPassword}
+              onChange={(e) => setAuthPassword(e.target.value)}
+              placeholder="Password"
+              className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+              required
+            />
+            <button
+              disabled={authBusy}
+              className="w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:bg-slate-400"
+            >
+              {authBusy ? "Please wait..." : authMode === "login" ? "Sign in with Email" : "Create account"}
+            </button>
+          </form>
+
+          {authMessage ? <p className="mt-2 text-xs text-slate-700">{authMessage}</p> : null}
+
+          <details className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <summary className="cursor-pointer text-sm font-semibold text-slate-700">Use SSO instead</summary>
+            <div className="mt-3 space-y-2">
+              <button
+                disabled={!availableProviders.google}
+                onClick={() => signIn("google")}
+                className="w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:bg-slate-400"
+              >
+                Continue with Google
+              </button>
+              <button
+                disabled={!availableProviders.apple}
+                onClick={() => signIn("apple")}
+                className="w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:bg-slate-400"
+              >
+                Continue with Apple
+              </button>
+              {(!availableProviders.google || !availableProviders.apple) && (
+                <p className="text-xs text-amber-700">Providers are not fully configured yet.</p>
+              )}
+              <button
+                onClick={runOAuthSetup}
+                className="w-full rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-800"
+              >
+                Configure OAuth on this server
+              </button>
+              {setupMessage ? <p className="text-xs text-slate-700">{setupMessage}</p> : null}
+            </div>
+          </details>
         </section>
       </main>
     );
@@ -552,7 +721,8 @@ export default function HomePage() {
             <div>
               <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">LifeOS</p>
               <h1 className="text-2xl font-semibold text-slate-900">Dashboard</h1>
-              <p className="text-xs text-slate-600">{effectiveUserEmail}</p>
+              <p className="text-xs text-slate-600">{profile?.user.displayName || effectiveUserEmail}</p>
+              {profile?.household ? <p className="text-xs text-slate-500">{profile.household.name} ({profile.household.role})</p> : null}
             </div>
             {session?.user?.email ? <button onClick={() => signOut()} className="rounded-full bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-800">Sign out</button> : null}
           </div>
@@ -561,7 +731,7 @@ export default function HomePage() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">LifeOS App</p>
-                <h1 className="text-2xl font-semibold text-slate-900">{view === "tasks" ? "Work / Tasks" : view === "calendar" ? "Calendar" : "Budget"}</h1>
+                <h1 className="text-2xl font-semibold text-slate-900">{view === "tasks" ? "Work / Tasks" : "Calendar"}</h1>
               </div>
               <div className="flex gap-2">
                 {view === "tasks" ? <button onClick={() => setCreateOpen(true)} className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white">+ Task</button> : null}
@@ -653,15 +823,6 @@ export default function HomePage() {
                   C
                 </div>
                 <span className="text-xs font-medium text-slate-700">Calendar</span>
-              </button>
-              <button
-                onClick={() => setView("budget")}
-                className="group flex flex-col items-center gap-2 text-center"
-              >
-                <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-600 text-lg font-bold text-white shadow-md transition group-hover:scale-105">
-                  B
-                </div>
-                <span className="text-xs font-medium text-slate-700">Budget</span>
               </button>
               <div className="flex flex-col items-center gap-2 text-center opacity-70">
                 <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-100 text-lg font-bold text-slate-500">+</div>
@@ -947,35 +1108,6 @@ export default function HomePage() {
             </section>
           )}
 
-          {view === "budget" && (
-            <section className="mt-4 grid gap-3 lg:grid-cols-[2fr_1fr]">
-              <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
-                <h2 className="text-lg font-semibold">Budget Projects</h2>
-                <p className="mt-1 text-sm text-slate-700">Project-first budget workspace. Cashflow modules plug in next.</p>
-                <div className="mt-3 space-y-2">
-                  {budgetProjects.length === 0 ? (
-                    <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">No Budget projects yet. Create tasks in Area: Budget to seed this list.</p>
-                  ) : (
-                    budgetProjects.map((project) => (
-                      <div key={project.name} className="rounded-xl border border-slate-200 bg-white p-3">
-                        <p className="text-sm font-semibold text-slate-800">{project.name}</p>
-                        <p className="text-xs text-slate-600">{project.done}/{project.total} tasks completed</p>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </article>
-              <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
-                <h2 className="text-lg font-semibold">Budget Modules (Next)</h2>
-                <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-700">
-                  <li>Accounts</li>
-                  <li>Cashflow entries</li>
-                  <li>Forecast and runway</li>
-                  <li>Household vs business split</li>
-                </ul>
-              </article>
-            </section>
-          )}
         </>
       )}
 
