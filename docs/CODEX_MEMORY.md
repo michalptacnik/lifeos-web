@@ -5,6 +5,7 @@
 - Local auth proxy routes exist with CSRF checks:
   - `app/api/local-auth/register/route.ts`
   - `app/api/local-auth/login/route.ts`
+- Proxy hard-fails in production when any dev auth bypass env is configured.
 - Task/worktime/automation data loading uses targeted invalidation instead of full refresh on every mutation.
 - Added session profile route (`/api/session/profile`) and client-side profile consumption.
 
@@ -18,6 +19,7 @@
 ## Operational notes
 - Web requires same strong `INTERNAL_API_KEY` as API.
 - NextAuth credentials flow relies on API `/auth/login`.
+- Production must keep `ALLOW_DEV_AUTH_BYPASS=false` and `DEV_AUTH_BYPASS_EMAIL` unset.
 
 ## Open risks
 - `app/page.tsx` is large; further modularization is recommended.

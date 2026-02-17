@@ -49,6 +49,19 @@ describe("lifeos web proxy route", () => {
     expect((init.headers as Record<string, string>)["x-user-email"]).toBe("dev@example.com");
   });
 
+  it("returns 500 when bypass is configured in production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    process.env.ALLOW_DEV_AUTH_BYPASS = "true";
+    process.env.DEV_AUTH_BYPASS_EMAIL = "dev@example.com";
+    getServerSessionMock.mockResolvedValue(null);
+
+    const mod = await import("../app/api/lifeos/[...path]/route");
+    const req = new NextRequest("http://localhost/api/lifeos/tasks");
+    const res = await mod.GET(req, { params: Promise.resolve({ path: ["tasks"] }) });
+
+    expect(res.status).toBe(500);
+  });
+
   it("returns 500 for weak internal key configuration", async () => {
     process.env.INTERNAL_API_KEY = "replace_with_shared_internal_key";
     getServerSessionMock.mockResolvedValue({ user: { email: "member@example.com" } });
