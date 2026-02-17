@@ -37,3 +37,24 @@
 ### Next steps
 - Push this branch and verify `Web CI` workflow passes in GitHub Actions.
 - Enforce `Web CI` as required status check on `main`.
+
+## 2026-02-17 (MVP0 auth trust-boundary hardening)
+### What changed
+- Updated `app/api/lifeos/[...path]/route.ts` to enforce strict dev-bypass resolution.
+- Proxy now returns 500 in production when any dev bypass env is present (`ALLOW_DEV_AUTH_BYPASS=true` or non-empty `DEV_AUTH_BYPASS_EMAIL`).
+- Proxy now returns 500 if bypass is enabled without `DEV_AUTH_BYPASS_EMAIL` in non-production.
+- Added production misconfiguration regression test in `tests/proxy-route.test.ts`.
+- Updated `README.md` security notes and `docs/CODEX_MEMORY.md` operational constraints.
+
+### Why
+- Implement MVP0 trust boundary requirement: dev auth bypass must be impossible in production and misconfiguration should be explicit, not silent.
+
+### Commands/tests run
+- `./node_modules/.bin/tsc --noEmit && npm run test && npm run build`
+
+### Known issues/risks
+- API still trusts `x-user-email` from callers with the internal key; this is acceptable for current proxy trust model but should remain tightly scoped to private network ingress.
+
+### Next steps
+- Document and enforce private-network ingress assumptions for API internal key routes.
+- Continue with API-side trust boundary hardening tasks.
