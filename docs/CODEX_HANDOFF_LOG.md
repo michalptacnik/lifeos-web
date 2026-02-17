@@ -58,3 +58,28 @@
 ### Next steps
 - Document and enforce private-network ingress assumptions for API internal key routes.
 - Continue with API-side trust boundary hardening tasks.
+
+## 2026-02-17 (MVP1 inventory app shell)
+### What changed
+- Extended `app/page.tsx` with a new `inventory` app view and dashboard launcher.
+- Added inventory client models and event-driven resource loading (`/api/lifeos/inventory`) into existing invalidation flow.
+- Implemented subtype-focused inventory UX:
+  - Home / Work / Food filters
+  - create item form (name, subtype, quantity, unit, category, location)
+  - list rendering with contextual metadata
+  - delete action with optimistic rollback on failure
+- Kept interaction model lightweight with immediate feedback and no polling loops.
+- Updated `docs/CODEX_MEMORY.md` with inventory shell state.
+
+### Why
+- Execute MVP1 web issue for inventory shell so users can navigate and act within subtype-specific inventory context, aligned with recognition-over-recall principles.
+
+### Commands/tests run
+- `./node_modules/.bin/tsc --noEmit && npm run test && npm run build`
+
+### Known issues/risks
+- Inventory edit/adjust flows are not yet implemented (create/list/delete only in this increment).
+
+### Next steps
+- Add inventory edit/update interactions and food-specific affordances for recipe readiness checks.
+- Continue with MVP2 food intelligence issue implementation.
