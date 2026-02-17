@@ -5,10 +5,11 @@ import { signIn, signOut, useSession } from "next-auth/react";
 
 type TaskStatus = "TODO" | "IN_PROCESS" | "DONE";
 type TabKey = "kanban" | "worktime";
-type AppView = "dashboard" | "tasks" | "calendar";
+type AppView = "dashboard" | "tasks" | "calendar" | "inventory";
 type AreaKey = "HOME" | "BUDGET" | "WORK";
 type AuthMode = "login" | "register";
-type ResourceKey = "tasks" | "worktime" | "automation";
+type ResourceKey = "tasks" | "worktime" | "automation" | "inventory";
+type InventorySubtype = "HOME" | "WORK" | "FOOD";
 type SessionProfile = {
   user: {
     id: string;
@@ -83,6 +84,18 @@ type AutomationPlanResponse = {
   message?: string;
 };
 
+type InventoryItem = {
+  id: string;
+  name: string;
+  subtype: InventorySubtype;
+  quantity: number;
+  unit: string;
+  category: string | null;
+  location: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const columns: TaskStatus[] = ["TODO", "IN_PROCESS", "DONE"];
 const areas: AreaKey[] = ["HOME", "BUDGET", "WORK"];
 const areaLabel: Record<AreaKey, string> = {
@@ -104,6 +117,21 @@ const emptyTaskForm = {
   ownerEmail: "",
   startedOn: "",
   finishedOn: ""
+};
+
+const inventorySubtypes: InventorySubtype[] = ["HOME", "WORK", "FOOD"];
+const inventorySubtypeLabel: Record<InventorySubtype, string> = {
+  HOME: "Home",
+  WORK: "Work",
+  FOOD: "Food"
+};
+const emptyInventoryForm = {
+  name: "",
+  subtype: "HOME" as InventorySubtype,
+  quantity: "1",
+  unit: "item",
+  category: "",
+  location: ""
 };
 
 function fmt(value: string | null) {
@@ -157,6 +185,9 @@ export default function HomePage() {
   const [view, setView] = useState<AppView>("dashboard");
   const [tab, setTab] = useState<TabKey>("kanban");
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
+  const [inventoryForm, setInventoryForm] = useState(emptyInventoryForm);
+  const [inventorySubtypeFilter, setInventorySubtypeFilter] = useState<InventorySubtype | "ALL">("ALL");
   const [worktime, setWorktime] = useState<WorktimePayload>({ queueTasks: [], activeSession: null, recentSessions: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -246,6 +277,10 @@ export default function HomePage() {
       return Boolean((startedOn && isSameDay(startedOn, today)) || (finishedOn && isSameDay(finishedOn, today)));
     });
   }, [tasks]);
+  const visibleInventoryItems = useMemo(() => {
+    if (inventorySubtypeFilter === "ALL") return inventoryItems;
+    return inventoryItems.filter((item) => item.subtype === inventorySubtypeFilter);
+  }, [inventoryItems, inventorySubtypeFilter]);
   async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(`/api/lifeos${path}`, {
       ...init,
@@ -272,16 +307,25 @@ export default function HomePage() {
     setError(null);
     try {
       const tasksPromise = resources.includes("tasks") ? api<Task[]>("/tasks") : Promise.resolve(null);
+      const inventoryPromise = resources.includes("inventory") ? api<InventoryItem[]>("/inventory") : Promise.resolve(null);
       const worktimePromise = resources.includes("worktime") ? api<WorktimePayload>("/worktime") : Promise.resolve(null);
       const automationPromise = resources.includes("automation")
         ? api<AutomationActivityItem[]>("/automation/activity").catch(() => [])
         : Promise.resolve(null);
 
-      const [tasksData, worktimeData, activityData] = await Promise.all([tasksPromise, worktimePromise, automationPromise]);
+      const [tasksData, inventoryData, worktimeData, activityData] = await Promise.all([
+        tasksPromise,
+        inventoryPromise,
+        worktimePromise,
+        automationPromise
+      ]);
 
       if (tasksData) {
         setTasks(tasksData);
         setTaskForm((prev) => ({ ...prev, ownerEmail: prev.ownerEmail || effectiveUserEmail || "" }));
+      }
+      if (inventoryData) {
+        setInventoryItems(inventoryData);
       }
       if (worktimeData) {
         setWorktime(worktimeData);
@@ -303,7 +347,7 @@ export default function HomePage() {
   }
 
   useEffect(() => {
-    void loadResources(["tasks", "worktime", "automation"], { showLoading: true });
+    void loadResources(["tasks", "inventory", "worktime", "automation"], { showLoading: true });
   }, [effectiveUserEmail]);
 
   useEffect(() => {
@@ -451,6 +495,43 @@ export default function HomePage() {
       invalidate("tasks", "worktime");
     } catch (err) {
       setTasks(prevTasks);
+      setError((err as Error).message);
+    }
+  }
+
+  async function createInventoryItem(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    try {
+      const quantity = Number(inventoryForm.quantity);
+      const created = await api<InventoryItem>("/inventory", {
+        method: "POST",
+        body: JSON.stringify({
+          name: inventoryForm.name,
+          subtype: inventoryForm.subtype,
+          quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+          unit: inventoryForm.unit,
+          category: inventoryForm.category || null,
+          location: inventoryForm.location || null
+        })
+      });
+      setInventoryItems((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
+      setInventoryForm({ ...emptyInventoryForm, subtype: inventoryForm.subtype });
+      invalidate("inventory");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function deleteInventoryItem(itemId: string) {
+    setError(null);
+    const prev = inventoryItems;
+    setInventoryItems((list) => list.filter((item) => item.id !== itemId));
+    try {
+      await api(`/inventory/${itemId}`, { method: "DELETE" });
+      invalidate("inventory");
+    } catch (err) {
+      setInventoryItems(prev);
       setError((err as Error).message);
     }
   }
@@ -731,7 +812,9 @@ export default function HomePage() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">LifeOS App</p>
-                <h1 className="text-2xl font-semibold text-slate-900">{view === "tasks" ? "Work / Tasks" : "Calendar"}</h1>
+                <h1 className="text-2xl font-semibold text-slate-900">
+                  {view === "tasks" ? "Work / Tasks" : view === "calendar" ? "Calendar" : "Inventory"}
+                </h1>
               </div>
               <div className="flex gap-2">
                 {view === "tasks" ? <button onClick={() => setCreateOpen(true)} className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white">+ Task</button> : null}
@@ -824,6 +907,15 @@ export default function HomePage() {
                 </div>
                 <span className="text-xs font-medium text-slate-700">Calendar</span>
               </button>
+              <button
+                onClick={() => setView("inventory")}
+                className="group flex flex-col items-center gap-2 text-center"
+              >
+                <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-600 text-lg font-bold text-white shadow-md transition group-hover:scale-105">
+                  I
+                </div>
+                <span className="text-xs font-medium text-slate-700">Inventory</span>
+              </button>
               <div className="flex flex-col items-center gap-2 text-center opacity-70">
                 <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-100 text-lg font-bold text-slate-500">+</div>
                 <span className="text-xs font-medium text-slate-600">Empty</span>
@@ -891,7 +983,7 @@ export default function HomePage() {
         </section>
       ) : (
         <>
-          {view === "tasks" && error ? <p className="mt-3 rounded-2xl bg-rose-100 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
+          {error ? <p className="mt-3 rounded-2xl bg-rose-100 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
 
           {view === "tasks" && tab === "kanban" && (
             <section className="mt-4 space-y-4">
@@ -1104,6 +1196,108 @@ export default function HomePage() {
                 <p className="mt-3 text-xs text-slate-500">
                   Existing ICS feed: <a className="underline" href="/api/lifeos/calendar/tasks.ics" target="_blank" rel="noreferrer">/api/lifeos/calendar/tasks.ics</a>
                 </p>
+              </article>
+            </section>
+          )}
+
+          {view === "inventory" && (
+            <section className="mt-4 grid gap-4 lg:grid-cols-[1.2fr_1.8fr]">
+              <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
+                <h2 className="text-lg font-semibold text-slate-900">Add Inventory Item</h2>
+                <p className="mt-1 text-sm text-slate-600">Capture stock by subtype with quantity and unit.</p>
+                <form onSubmit={createInventoryItem} className="mt-3 grid gap-2">
+                  <input
+                    required
+                    value={inventoryForm.name}
+                    onChange={(e) => setInventoryForm((prev) => ({ ...prev, name: e.target.value }))}
+                    className="rounded-xl border border-slate-300 px-3 py-2"
+                    placeholder="Item name"
+                  />
+                  <div className="grid grid-cols-3 gap-2">
+                    <select
+                      value={inventoryForm.subtype}
+                      onChange={(e) => setInventoryForm((prev) => ({ ...prev, subtype: e.target.value as InventorySubtype }))}
+                      className="rounded-xl border border-slate-300 px-3 py-2"
+                    >
+                      {inventorySubtypes.map((subtype) => (
+                        <option key={subtype} value={subtype}>{inventorySubtypeLabel[subtype]}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      min="0.001"
+                      step="0.001"
+                      value={inventoryForm.quantity}
+                      onChange={(e) => setInventoryForm((prev) => ({ ...prev, quantity: e.target.value }))}
+                      className="rounded-xl border border-slate-300 px-3 py-2"
+                      placeholder="Qty"
+                    />
+                    <input
+                      value={inventoryForm.unit}
+                      onChange={(e) => setInventoryForm((prev) => ({ ...prev, unit: e.target.value }))}
+                      className="rounded-xl border border-slate-300 px-3 py-2"
+                      placeholder="Unit"
+                    />
+                  </div>
+                  <input
+                    value={inventoryForm.category}
+                    onChange={(e) => setInventoryForm((prev) => ({ ...prev, category: e.target.value }))}
+                    className="rounded-xl border border-slate-300 px-3 py-2"
+                    placeholder="Category (optional)"
+                  />
+                  <input
+                    value={inventoryForm.location}
+                    onChange={(e) => setInventoryForm((prev) => ({ ...prev, location: e.target.value }))}
+                    className="rounded-xl border border-slate-300 px-3 py-2"
+                    placeholder="Location (optional)"
+                  />
+                  <button type="submit" className="mt-1 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Add Item</button>
+                </form>
+              </article>
+
+              <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-lg font-semibold text-slate-900">Inventory List</h2>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => setInventorySubtypeFilter("ALL")}
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${inventorySubtypeFilter === "ALL" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"}`}
+                    >
+                      All
+                    </button>
+                    {inventorySubtypes.map((subtype) => (
+                      <button
+                        key={subtype}
+                        onClick={() => setInventorySubtypeFilter(subtype)}
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${inventorySubtypeFilter === subtype ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"}`}
+                      >
+                        {inventorySubtypeLabel[subtype]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {visibleInventoryItems.length === 0 ? (
+                    <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">No inventory items yet for this view.</p>
+                  ) : (
+                    visibleInventoryItems.map((item) => (
+                      <div key={item.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-800">{item.name}</p>
+                            <p className="text-xs text-slate-600">
+                              {inventorySubtypeLabel[item.subtype]} · {item.quantity} {item.unit}
+                            </p>
+                            <p className="text-xs text-slate-500">
+                              {item.category ? `Category: ${item.category}` : "No category"} · {item.location ? `Location: ${item.location}` : "No location"}
+                            </p>
+                          </div>
+                          <button onClick={() => deleteInventoryItem(item.id)} className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700">Delete</button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
               </article>
             </section>
           )}
