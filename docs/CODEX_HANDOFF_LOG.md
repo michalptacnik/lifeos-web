@@ -19,3 +19,21 @@
 
 ### Next steps
 - Extract auth screen and task/worktime sections into isolated components/hooks.
+
+## 2026-02-17 (P0.2 CI gates)
+### What changed
+- Added Web GitHub Actions workflow at `.github/workflows/ci.yml` with install, typecheck, tests, and production build gates.
+
+### Why
+- Implement production release blocker P0.2 so web regressions fail in PR before merge.
+
+### Commands/tests run
+- `npm ci`
+- `./node_modules/.bin/tsc --noEmit && npm run test && npm run build`
+
+### Known issues/risks
+- Branch protection updates require authenticated GitHub API access.
+
+### Next steps
+- Push this branch and verify `Web CI` workflow passes in GitHub Actions.
+- Enforce `Web CI` as required status check on `main`.
