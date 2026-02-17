@@ -11,7 +11,7 @@ Next.js frontend for LifeOS with responsive module-driven UX.
 - Obligations
 - Notifications Center
 
-Inventory includes food-specific recipe feasibility checks with quick-add actions for missing ingredients.
+Inventory includes food-specific recipe CRUD, feasibility checks, and quick-add actions for missing ingredients.
 
 ## Quick Start
 ```bash

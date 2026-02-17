@@ -9,6 +9,7 @@
 - Task/worktime/automation data loading uses targeted invalidation instead of full refresh on every mutation.
 - Added inventory app shell with subtype-focused views (`Home`, `Work`, `Food`) and direct API-backed CRUD.
 - Added food recipe feasibility UX (`/food/recipes/:id/availability`) with shortage highlighting and one-click quick add to food store.
+- Added recipe CRUD UX with inline validation, ingredient normalization hints (unit aliases), and explicit correction feedback before save.
 - Added session profile route (`/api/session/profile`) and client-side profile consumption.
 
 ## Key files
