@@ -107,3 +107,29 @@
 ### Next steps
 - Implement recipe CRUD UI with ingredient normalization/validation flows.
 - Split food/inventory domain section out of `app/page.tsx` into dedicated components.
+
+## 2026-02-17 (MVP2 recipe CRUD + normalization UX)
+### What changed
+- Expanded `app/page.tsx` food area with recipe lifecycle operations:
+  - create recipe with dynamic ingredient rows
+  - edit existing recipe and persist via `PATCH /food/recipes/:id`
+  - delete recipe via `DELETE /food/recipes/:id`
+- Added inline validation with actionable errors for invalid recipe drafts (missing name, bad quantity, duplicate ingredient+unit rows).
+- Added normalization/correction hints for noisy ingredient input:
+  - trims/collapses ingredient names
+  - normalizes known unit aliases (for example `pieces` -> `item`, `kilograms` -> `kg`)
+- Kept deterministic feasibility checker integrated with CRUD flows and retained quick-add shortage actions.
+- Updated `README.md` and `docs/CODEX_MEMORY.md` for the new recipe CRUD UX contract.
+
+### Why
+- Execute MVP2 recipe CRUD issue so users can safely maintain recipes with immediate corrective feedback and no silent failures.
+
+### Commands/tests run
+- `./node_modules/.bin/tsc --noEmit && npm run test && npm run build`
+
+### Known issues/risks
+- Unit normalization currently uses a small alias map and does not perform conversion math between units.
+
+### Next steps
+- Extract recipe CRUD/feasibility panel from `app/page.tsx` into dedicated components.
+- Add structured confirm dialogs for destructive recipe deletes.

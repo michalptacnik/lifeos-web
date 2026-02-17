@@ -129,6 +129,19 @@ type RecipeAvailability = {
   shortages: RecipeAvailabilityIngredient[];
 };
 
+type RecipeIngredientDraft = {
+  key: string;
+  name: string;
+  quantity: string;
+  unit: string;
+};
+
+type RecipeFormErrors = {
+  name?: string;
+  ingredients?: string;
+  rows: Record<string, { name?: string; quantity?: string; unit?: string }>;
+};
+
 const columns: TaskStatus[] = ["TODO", "IN_PROCESS", "DONE"];
 const areas: AreaKey[] = ["HOME", "BUDGET", "WORK"];
 const areaLabel: Record<AreaKey, string> = {
@@ -166,6 +179,30 @@ const emptyInventoryForm = {
   category: "",
   location: ""
 };
+const unitAliases: Record<string, string> = {
+  kg: "kg",
+  kgs: "kg",
+  kilogram: "kg",
+  kilograms: "kg",
+  g: "g",
+  gram: "g",
+  grams: "g",
+  l: "l",
+  liter: "l",
+  liters: "l",
+  ml: "ml",
+  milliliter: "ml",
+  milliliters: "ml",
+  piece: "item",
+  pieces: "item",
+  pc: "item",
+  pcs: "item",
+  item: "item"
+};
+
+function createIngredientDraft(): RecipeIngredientDraft {
+  return { key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, name: "", quantity: "1", unit: "item" };
+}
 
 function fmt(value: string | null) {
   if (!value) return "-";
@@ -211,6 +248,15 @@ function decodeProject(areaValue: AreaKey | null | undefined, value: string | nu
   return { area: "WORK", projectName: value };
 }
 
+function normalizeIngredientName(name: string) {
+  return name.trim().replace(/\s+/g, " ");
+}
+
+function normalizeUnit(unit: string) {
+  const normalized = unit.trim().toLowerCase();
+  return unitAliases[normalized] ?? normalized;
+}
+
 export default function HomePage() {
   const { data: session, status } = useSession();
   const [profile, setProfile] = useState<SessionProfile | null>(null);
@@ -223,8 +269,14 @@ export default function HomePage() {
   const [inventorySubtypeFilter, setInventorySubtypeFilter] = useState<InventorySubtype | "ALL">("ALL");
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [selectedRecipeId, setSelectedRecipeId] = useState<string>("");
+  const [editingRecipeId, setEditingRecipeId] = useState<string | null>(null);
+  const [recipeName, setRecipeName] = useState("");
+  const [recipeDescription, setRecipeDescription] = useState("");
+  const [recipeIngredients, setRecipeIngredients] = useState<RecipeIngredientDraft[]>([createIngredientDraft()]);
+  const [recipeFormErrors, setRecipeFormErrors] = useState<RecipeFormErrors>({ rows: {} });
   const [recipeAvailability, setRecipeAvailability] = useState<RecipeAvailability | null>(null);
   const [recipeBusy, setRecipeBusy] = useState(false);
+  const [recipeCrudBusy, setRecipeCrudBusy] = useState(false);
   const [recipeMessage, setRecipeMessage] = useState<string | null>(null);
   const [worktime, setWorktime] = useState<WorktimePayload>({ queueTasks: [], activeSession: null, recentSessions: [] });
   const [loading, setLoading] = useState(true);
@@ -322,6 +374,7 @@ export default function HomePage() {
   const foodInventoryItems = useMemo(() => {
     return inventoryItems.filter((item) => item.subtype === "FOOD");
   }, [inventoryItems]);
+  const selectedRecipe = useMemo(() => recipes.find((recipe) => recipe.id === selectedRecipeId) ?? null, [recipes, selectedRecipeId]);
   async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(`/api/lifeos${path}`, {
       ...init,
@@ -631,6 +684,125 @@ export default function HomePage() {
       invalidate("inventory");
     } catch (err) {
       setError((err as Error).message);
+    }
+  }
+
+  function resetRecipeForm() {
+    setEditingRecipeId(null);
+    setRecipeName("");
+    setRecipeDescription("");
+    setRecipeIngredients([createIngredientDraft()]);
+    setRecipeFormErrors({ rows: {} });
+  }
+
+  function startEditRecipe(recipe: Recipe) {
+    setEditingRecipeId(recipe.id);
+    setRecipeName(recipe.name);
+    setRecipeDescription(recipe.description ?? "");
+    setRecipeIngredients(
+      recipe.ingredients.map((ingredient) => ({
+        key: ingredient.id,
+        name: ingredient.name,
+        quantity: String(ingredient.quantity),
+        unit: ingredient.unit
+      }))
+    );
+    setRecipeFormErrors({ rows: {} });
+    setRecipeMessage(null);
+  }
+
+  function validateRecipeDraft() {
+    const rowErrors: RecipeFormErrors["rows"] = {};
+    const normalizedIngredients: Array<{ name: string; quantity: number; unit: string }> = [];
+    const duplicateKeys = new Set<string>();
+
+    recipeIngredients.forEach((row) => {
+      const name = normalizeIngredientName(row.name);
+      const unit = normalizeUnit(row.unit);
+      const quantity = Number(row.quantity);
+      const rowError: RecipeFormErrors["rows"][string] = {};
+
+      if (!name) rowError.name = "Ingredient name is required.";
+      if (!Number.isFinite(quantity) || quantity <= 0) rowError.quantity = "Quantity must be greater than 0.";
+      if (!unit) rowError.unit = "Unit is required.";
+      if (Object.keys(rowError).length > 0) rowErrors[row.key] = rowError;
+
+      const duplicateKey = `${name.toLowerCase()}::${unit.toLowerCase()}`;
+      if (name && unit) {
+        if (duplicateKeys.has(duplicateKey)) {
+          rowErrors[row.key] = { ...(rowErrors[row.key] ?? {}), name: "Duplicate ingredient with same unit." };
+        }
+        duplicateKeys.add(duplicateKey);
+      }
+
+      if (!rowErrors[row.key]) {
+        normalizedIngredients.push({ name, quantity, unit });
+      }
+    });
+
+    const normalizedName = recipeName.trim();
+    const errors: RecipeFormErrors = { rows: rowErrors };
+    if (!normalizedName) errors.name = "Recipe name is required.";
+    if (recipeIngredients.length === 0) errors.ingredients = "Add at least one ingredient.";
+    if (normalizedIngredients.length === 0) errors.ingredients = "Add at least one valid ingredient.";
+
+    const hasErrors = Boolean(errors.name || errors.ingredients || Object.keys(errors.rows).length > 0);
+    return { hasErrors, errors, normalizedName, normalizedIngredients };
+  }
+
+  async function submitRecipe(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setRecipeMessage(null);
+    const draft = validateRecipeDraft();
+    setRecipeFormErrors(draft.errors);
+    if (draft.hasErrors) {
+      setRecipeMessage("Fix highlighted fields to save recipe.");
+      return;
+    }
+
+    setRecipeCrudBusy(true);
+    try {
+      const path = editingRecipeId ? `/food/recipes/${editingRecipeId}` : "/food/recipes";
+      const method = editingRecipeId ? "PATCH" : "POST";
+      const saved = await api<Recipe>(path, {
+        method,
+        body: JSON.stringify({
+          name: draft.normalizedName,
+          description: recipeDescription.trim() || null,
+          ingredients: draft.normalizedIngredients
+        })
+      });
+      setRecipeMessage(editingRecipeId ? "Recipe updated." : "Recipe created.");
+      resetRecipeForm();
+      setSelectedRecipeId(saved.id);
+      invalidate("food");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setRecipeCrudBusy(false);
+    }
+  }
+
+  async function removeRecipe(recipeId: string) {
+    setError(null);
+    setRecipeMessage(null);
+    setRecipeCrudBusy(true);
+    try {
+      await api(`/food/recipes/${recipeId}`, { method: "DELETE" });
+      setRecipeMessage("Recipe deleted.");
+      if (selectedRecipeId === recipeId) {
+        setSelectedRecipeId("");
+        setRecipeAvailability(null);
+      }
+      if (editingRecipeId === recipeId) {
+        resetRecipeForm();
+      }
+      invalidate("food");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setRecipeCrudBusy(false);
     }
   }
 
@@ -1402,89 +1574,237 @@ export default function HomePage() {
               </article>
 
               <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)] lg:col-span-2">
-                <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-900">{editingRecipeId ? "Edit Recipe" : "Create Recipe"}</h2>
+                    <p className="mt-1 text-sm text-slate-600">Normalize noisy ingredient input and save recipes safely.</p>
+                    <form onSubmit={submitRecipe} className="mt-3 space-y-2">
+                      <div>
+                        <input
+                          value={recipeName}
+                          onChange={(e) => setRecipeName(e.target.value)}
+                          className={`w-full rounded-xl border px-3 py-2 ${recipeFormErrors.name ? "border-rose-400" : "border-slate-300"}`}
+                          placeholder="Recipe name"
+                        />
+                        {recipeFormErrors.name ? <p className="mt-1 text-xs text-rose-700">{recipeFormErrors.name}</p> : null}
+                      </div>
+                      <textarea
+                        value={recipeDescription}
+                        onChange={(e) => setRecipeDescription(e.target.value)}
+                        className="w-full rounded-xl border border-slate-300 px-3 py-2"
+                        placeholder="Description (optional)"
+                        rows={2}
+                      />
+                      <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Ingredients</p>
+                        {recipeIngredients.map((row, index) => {
+                          const normalizedName = normalizeIngredientName(row.name);
+                          const normalizedUnit = normalizeUnit(row.unit);
+                          const rowErrors = recipeFormErrors.rows[row.key] ?? {};
+                          const suggestion =
+                            (row.name && normalizedName !== row.name.trim()) || (row.unit && normalizedUnit !== row.unit.trim().toLowerCase())
+                              ? `Will normalize to: ${normalizedName || "?"} · ${normalizedUnit || "?"}`
+                              : null;
+
+                          return (
+                            <div key={row.key} className="rounded-xl border border-slate-200 bg-white p-2">
+                              <div className="grid gap-2 md:grid-cols-[1.8fr_0.8fr_0.8fr_auto]">
+                                <input
+                                  value={row.name}
+                                  onChange={(e) =>
+                                    setRecipeIngredients((prev) =>
+                                      prev.map((item) => (item.key === row.key ? { ...item, name: e.target.value } : item))
+                                    )
+                                  }
+                                  className={`rounded-xl border px-3 py-2 text-sm ${rowErrors.name ? "border-rose-400" : "border-slate-300"}`}
+                                  placeholder={`Ingredient ${index + 1}`}
+                                />
+                                <input
+                                  value={row.quantity}
+                                  onChange={(e) =>
+                                    setRecipeIngredients((prev) =>
+                                      prev.map((item) => (item.key === row.key ? { ...item, quantity: e.target.value } : item))
+                                    )
+                                  }
+                                  className={`rounded-xl border px-3 py-2 text-sm ${rowErrors.quantity ? "border-rose-400" : "border-slate-300"}`}
+                                  placeholder="Qty"
+                                />
+                                <input
+                                  value={row.unit}
+                                  onChange={(e) =>
+                                    setRecipeIngredients((prev) =>
+                                      prev.map((item) => (item.key === row.key ? { ...item, unit: e.target.value } : item))
+                                    )
+                                  }
+                                  className={`rounded-xl border px-3 py-2 text-sm ${rowErrors.unit ? "border-rose-400" : "border-slate-300"}`}
+                                  placeholder="Unit"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setRecipeIngredients((prev) => (prev.length > 1 ? prev.filter((item) => item.key !== row.key) : prev))}
+                                  className="rounded-full bg-slate-200 px-3 py-2 text-xs font-semibold text-slate-700"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                              {rowErrors.name || rowErrors.quantity || rowErrors.unit ? (
+                                <p className="mt-1 text-xs text-rose-700">
+                                  {rowErrors.name ?? rowErrors.quantity ?? rowErrors.unit}
+                                </p>
+                              ) : null}
+                              {suggestion ? <p className="mt-1 text-xs text-sky-700">{suggestion}</p> : null}
+                            </div>
+                          );
+                        })}
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setRecipeIngredients((prev) => [...prev, createIngredientDraft()])}
+                            className="rounded-full bg-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                          >
+                            Add ingredient
+                          </button>
+                          {editingRecipeId ? (
+                            <button
+                              type="button"
+                              onClick={resetRecipeForm}
+                              className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700"
+                            >
+                              Cancel edit
+                            </button>
+                          ) : null}
+                        </div>
+                        {recipeFormErrors.ingredients ? <p className="text-xs text-rose-700">{recipeFormErrors.ingredients}</p> : null}
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={recipeCrudBusy}
+                        className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {recipeCrudBusy ? "Saving..." : editingRecipeId ? "Save Recipe" : "Create Recipe"}
+                      </button>
+                    </form>
+                    <div className="mt-3 space-y-2">
+                      {recipes.map((recipe) => (
+                        <div key={recipe.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div>
+                              <p className="text-sm font-semibold text-slate-800">{recipe.name}</p>
+                              <p className="text-xs text-slate-500">{recipe.ingredients.length} ingredients</p>
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() => startEditRecipe(recipe)}
+                                className="rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void removeRecipe(recipe.id)}
+                                className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {recipes.length === 0 ? <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">No recipes yet.</p> : null}
+                    </div>
+                  </div>
+
                   <div>
                     <h2 className="text-lg font-semibold text-slate-900">Can Cook Now</h2>
                     <p className="mt-1 text-sm text-slate-600">Pick a recipe, run feasibility check, and quick-add missing ingredients.</p>
-                  </div>
-                  <div className="min-w-56">
-                    <select
-                      value={selectedRecipeId}
-                      onChange={(e) => setSelectedRecipeId(e.target.value)}
-                      className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                    >
-                      {recipes.length === 0 ? (
-                        <option value="">No recipes yet</option>
-                      ) : (
-                        recipes.map((recipe) => (
-                          <option key={recipe.id} value={recipe.id}>
-                            {recipe.name}
-                          </option>
-                        ))
-                      )}
-                    </select>
-                    <button
-                      onClick={() => void checkRecipeAvailability(selectedRecipeId)}
-                      disabled={!selectedRecipeId || recipeBusy}
-                      className="mt-2 w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {recipeBusy ? "Checking..." : "Check Availability"}
-                    </button>
+                    <div className="mt-3 min-w-56">
+                      <select
+                        value={selectedRecipeId}
+                        onChange={(e) => setSelectedRecipeId(e.target.value)}
+                        className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                      >
+                        {recipes.length === 0 ? (
+                          <option value="">No recipes yet</option>
+                        ) : (
+                          recipes.map((recipe) => (
+                            <option key={recipe.id} value={recipe.id}>
+                              {recipe.name}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => void checkRecipeAvailability(selectedRecipeId)}
+                        disabled={!selectedRecipeId || recipeBusy}
+                        className="mt-2 w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {recipeBusy ? "Checking..." : "Check Availability"}
+                      </button>
+                    </div>
+
+                    {recipeMessage ? (
+                      <p className={`mt-3 rounded-xl px-3 py-2 text-sm ${recipeAvailability?.feasible ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                        {recipeMessage}
+                      </p>
+                    ) : null}
+
+                    {selectedRecipe ? (
+                      <p className="mt-3 text-xs text-slate-600">
+                        Selected recipe has {selectedRecipe.ingredients.length} ingredients.
+                      </p>
+                    ) : null}
+
+                    {recipeAvailability ? (
+                      <div className="mt-3 space-y-2">
+                        {recipeAvailability.ingredients.map((ingredient) => (
+                          <div key={ingredient.ingredientId} className="rounded-xl border border-slate-200 bg-white p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <p className="text-sm font-semibold text-slate-800">{ingredient.name}</p>
+                                <p className="text-xs text-slate-600">
+                                  Required {ingredient.required} {ingredient.unit} · Available {ingredient.available} {ingredient.unit}
+                                </p>
+                                {ingredient.missingQuantity > 0 ? (
+                                  <p className="text-xs text-rose-700">Missing {ingredient.missingQuantity} {ingredient.unit}</p>
+                                ) : (
+                                  <p className="text-xs text-emerald-700">Enough in store</p>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                                    ingredient.status === "enough"
+                                      ? "bg-emerald-100 text-emerald-700"
+                                      : ingredient.status === "partial"
+                                        ? "bg-amber-100 text-amber-700"
+                                        : "bg-rose-100 text-rose-700"
+                                  }`}
+                                >
+                                  {ingredient.status}
+                                </span>
+                                {ingredient.missingQuantity > 0 ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => void quickAddMissingIngredient(ingredient)}
+                                    className="rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700"
+                                  >
+                                    Quick add
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                        No recipe check yet. Select a recipe and run availability check.
+                      </p>
+                    )}
                   </div>
                 </div>
-
-                {recipeMessage ? (
-                  <p className={`mt-3 rounded-xl px-3 py-2 text-sm ${recipeAvailability?.feasible ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                    {recipeMessage}
-                  </p>
-                ) : null}
-
-                {recipeAvailability ? (
-                  <div className="mt-3 space-y-2">
-                    {recipeAvailability.ingredients.map((ingredient) => (
-                      <div key={ingredient.ingredientId} className="rounded-xl border border-slate-200 bg-white p-3">
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div>
-                            <p className="text-sm font-semibold text-slate-800">{ingredient.name}</p>
-                            <p className="text-xs text-slate-600">
-                              Required {ingredient.required} {ingredient.unit} · Available {ingredient.available} {ingredient.unit}
-                            </p>
-                            {ingredient.missingQuantity > 0 ? (
-                              <p className="text-xs text-rose-700">Missing {ingredient.missingQuantity} {ingredient.unit}</p>
-                            ) : (
-                              <p className="text-xs text-emerald-700">Enough in store</p>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`rounded-full px-2 py-1 text-xs font-semibold ${
-                                ingredient.status === "enough"
-                                  ? "bg-emerald-100 text-emerald-700"
-                                  : ingredient.status === "partial"
-                                    ? "bg-amber-100 text-amber-700"
-                                    : "bg-rose-100 text-rose-700"
-                              }`}
-                            >
-                              {ingredient.status}
-                            </span>
-                            {ingredient.missingQuantity > 0 ? (
-                              <button
-                                onClick={() => void quickAddMissingIngredient(ingredient)}
-                                className="rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700"
-                              >
-                                Quick add
-                              </button>
-                            ) : null}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                    No recipe check yet. Select a recipe and run availability check.
-                  </p>
-                )}
               </article>
             </section>
           )}
