@@ -8,7 +8,7 @@ type TabKey = "kanban" | "worktime";
 type AppView = "dashboard" | "tasks" | "calendar" | "inventory";
 type AreaKey = "HOME" | "BUDGET" | "WORK";
 type AuthMode = "login" | "register";
-type ResourceKey = "tasks" | "worktime" | "automation" | "inventory";
+type ResourceKey = "tasks" | "worktime" | "automation" | "inventory" | "food";
 type InventorySubtype = "HOME" | "WORK" | "FOOD";
 type SessionProfile = {
   user: {
@@ -94,6 +94,39 @@ type InventoryItem = {
   location: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+type RecipeIngredient = {
+  id: string;
+  name: string;
+  quantity: number;
+  unit: string;
+};
+
+type Recipe = {
+  id: string;
+  name: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+  ingredients: RecipeIngredient[];
+};
+
+type RecipeAvailabilityIngredient = {
+  ingredientId: string;
+  name: string;
+  unit: string;
+  required: number;
+  available: number;
+  missingQuantity: number;
+  status: "enough" | "partial" | "missing";
+};
+
+type RecipeAvailability = {
+  recipeId: string;
+  feasible: boolean;
+  ingredients: RecipeAvailabilityIngredient[];
+  shortages: RecipeAvailabilityIngredient[];
 };
 
 const columns: TaskStatus[] = ["TODO", "IN_PROCESS", "DONE"];
@@ -188,6 +221,11 @@ export default function HomePage() {
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const [inventoryForm, setInventoryForm] = useState(emptyInventoryForm);
   const [inventorySubtypeFilter, setInventorySubtypeFilter] = useState<InventorySubtype | "ALL">("ALL");
+  const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [selectedRecipeId, setSelectedRecipeId] = useState<string>("");
+  const [recipeAvailability, setRecipeAvailability] = useState<RecipeAvailability | null>(null);
+  const [recipeBusy, setRecipeBusy] = useState(false);
+  const [recipeMessage, setRecipeMessage] = useState<string | null>(null);
   const [worktime, setWorktime] = useState<WorktimePayload>({ queueTasks: [], activeSession: null, recentSessions: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -281,6 +319,9 @@ export default function HomePage() {
     if (inventorySubtypeFilter === "ALL") return inventoryItems;
     return inventoryItems.filter((item) => item.subtype === inventorySubtypeFilter);
   }, [inventoryItems, inventorySubtypeFilter]);
+  const foodInventoryItems = useMemo(() => {
+    return inventoryItems.filter((item) => item.subtype === "FOOD");
+  }, [inventoryItems]);
   async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(`/api/lifeos${path}`, {
       ...init,
@@ -312,12 +353,14 @@ export default function HomePage() {
       const automationPromise = resources.includes("automation")
         ? api<AutomationActivityItem[]>("/automation/activity").catch(() => [])
         : Promise.resolve(null);
+      const recipesPromise = resources.includes("food") ? api<Recipe[]>("/food/recipes") : Promise.resolve(null);
 
-      const [tasksData, inventoryData, worktimeData, activityData] = await Promise.all([
+      const [tasksData, inventoryData, worktimeData, activityData, recipesData] = await Promise.all([
         tasksPromise,
         inventoryPromise,
         worktimePromise,
-        automationPromise
+        automationPromise,
+        recipesPromise
       ]);
 
       if (tasksData) {
@@ -333,6 +376,13 @@ export default function HomePage() {
       if (activityData) {
         setAutomationActivity(activityData);
       }
+      if (recipesData) {
+        setRecipes(recipesData);
+        setSelectedRecipeId((prev) => {
+          if (prev && recipesData.some((recipe) => recipe.id === prev)) return prev;
+          return recipesData[0]?.id ?? "";
+        });
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -347,7 +397,7 @@ export default function HomePage() {
   }
 
   useEffect(() => {
-    void loadResources(["tasks", "inventory", "worktime", "automation"], { showLoading: true });
+    void loadResources(["tasks", "inventory", "worktime", "automation", "food"], { showLoading: true });
   }, [effectiveUserEmail]);
 
   useEffect(() => {
@@ -385,6 +435,11 @@ export default function HomePage() {
 
     loadProviders();
   }, []);
+
+  useEffect(() => {
+    setRecipeAvailability(null);
+    setRecipeMessage(null);
+  }, [selectedRecipeId]);
 
   useEffect(() => {
     if (!worktime.activeSession) return;
@@ -532,6 +587,49 @@ export default function HomePage() {
       invalidate("inventory");
     } catch (err) {
       setInventoryItems(prev);
+      setError((err as Error).message);
+    }
+  }
+
+  async function checkRecipeAvailability(recipeId: string) {
+    if (!recipeId) return;
+    setError(null);
+    setRecipeMessage(null);
+    setRecipeBusy(true);
+    try {
+      const availability = await api<RecipeAvailability>(`/food/recipes/${recipeId}/availability`);
+      setRecipeAvailability(availability);
+      setRecipeMessage(availability.feasible ? "Everything available. You can cook this now." : "Missing ingredients detected.");
+    } catch (err) {
+      setRecipeAvailability(null);
+      setError((err as Error).message);
+    } finally {
+      setRecipeBusy(false);
+    }
+  }
+
+  async function quickAddMissingIngredient(ingredient: RecipeAvailabilityIngredient) {
+    setError(null);
+    setRecipeMessage(null);
+    try {
+      const created = await api<InventoryItem>("/inventory", {
+        method: "POST",
+        body: JSON.stringify({
+          name: ingredient.name,
+          subtype: "FOOD",
+          quantity: ingredient.missingQuantity,
+          unit: ingredient.unit,
+          category: "Recipe shortage",
+          location: "Pantry"
+        })
+      });
+      setInventoryItems((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
+      setRecipeMessage(`Added ${ingredient.missingQuantity} ${ingredient.unit} of ${ingredient.name} to food store.`);
+      if (selectedRecipeId) {
+        await checkRecipeAvailability(selectedRecipeId);
+      }
+      invalidate("inventory");
+    } catch (err) {
       setError((err as Error).message);
     }
   }
@@ -1276,6 +1374,9 @@ export default function HomePage() {
                     ))}
                   </div>
                 </div>
+                <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                  Food store: {foodInventoryItems.length} items tracked.
+                </div>
                 <div className="mt-3 space-y-2">
                   {visibleInventoryItems.length === 0 ? (
                     <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">No inventory items yet for this view.</p>
@@ -1298,6 +1399,92 @@ export default function HomePage() {
                     ))
                   )}
                 </div>
+              </article>
+
+              <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)] lg:col-span-2">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-900">Can Cook Now</h2>
+                    <p className="mt-1 text-sm text-slate-600">Pick a recipe, run feasibility check, and quick-add missing ingredients.</p>
+                  </div>
+                  <div className="min-w-56">
+                    <select
+                      value={selectedRecipeId}
+                      onChange={(e) => setSelectedRecipeId(e.target.value)}
+                      className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                    >
+                      {recipes.length === 0 ? (
+                        <option value="">No recipes yet</option>
+                      ) : (
+                        recipes.map((recipe) => (
+                          <option key={recipe.id} value={recipe.id}>
+                            {recipe.name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <button
+                      onClick={() => void checkRecipeAvailability(selectedRecipeId)}
+                      disabled={!selectedRecipeId || recipeBusy}
+                      className="mt-2 w-full rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {recipeBusy ? "Checking..." : "Check Availability"}
+                    </button>
+                  </div>
+                </div>
+
+                {recipeMessage ? (
+                  <p className={`mt-3 rounded-xl px-3 py-2 text-sm ${recipeAvailability?.feasible ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                    {recipeMessage}
+                  </p>
+                ) : null}
+
+                {recipeAvailability ? (
+                  <div className="mt-3 space-y-2">
+                    {recipeAvailability.ingredients.map((ingredient) => (
+                      <div key={ingredient.ingredientId} className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-800">{ingredient.name}</p>
+                            <p className="text-xs text-slate-600">
+                              Required {ingredient.required} {ingredient.unit} · Available {ingredient.available} {ingredient.unit}
+                            </p>
+                            {ingredient.missingQuantity > 0 ? (
+                              <p className="text-xs text-rose-700">Missing {ingredient.missingQuantity} {ingredient.unit}</p>
+                            ) : (
+                              <p className="text-xs text-emerald-700">Enough in store</p>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                                ingredient.status === "enough"
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : ingredient.status === "partial"
+                                    ? "bg-amber-100 text-amber-700"
+                                    : "bg-rose-100 text-rose-700"
+                              }`}
+                            >
+                              {ingredient.status}
+                            </span>
+                            {ingredient.missingQuantity > 0 ? (
+                              <button
+                                onClick={() => void quickAddMissingIngredient(ingredient)}
+                                className="rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700"
+                              >
+                                Quick add
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                    No recipe check yet. Select a recipe and run availability check.
+                  </p>
+                )}
               </article>
             </section>
           )}

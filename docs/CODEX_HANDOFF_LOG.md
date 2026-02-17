@@ -83,3 +83,27 @@
 ### Next steps
 - Add inventory edit/update interactions and food-specific affordances for recipe readiness checks.
 - Continue with MVP2 food intelligence issue implementation.
+
+## 2026-02-17 (MVP2 food store + feasibility UX)
+### What changed
+- Extended `app/page.tsx` inventory view with food recipe feasibility flow:
+  - loads recipes from `GET /food/recipes`
+  - allows recipe selection and explicit feasibility check via `GET /food/recipes/:id/availability`
+  - renders per-ingredient `enough/partial/missing` status with exact missing deltas
+  - adds `Quick add` action for shortages to create `FOOD` inventory entries in one click
+- Extended resource loading pipeline with `food` resource key while keeping targeted invalidation model.
+- Added contextual food-store signal (`Food store: N items tracked`) in inventory list.
+- Updated `README.md` and `docs/CODEX_MEMORY.md` with food feasibility behavior.
+
+### Why
+- Execute MVP2 issue so users can decide if a recipe is cookable from current food stock in a short path and immediately resolve shortages.
+
+### Commands/tests run
+- `./node_modules/.bin/tsc --noEmit && npm run test && npm run build`
+
+### Known issues/risks
+- UI currently depends on existing recipes and does not yet include recipe create/edit forms (handled in next MVP2 issue).
+
+### Next steps
+- Implement recipe CRUD UI with ingredient normalization/validation flows.
+- Split food/inventory domain section out of `app/page.tsx` into dedicated components.
