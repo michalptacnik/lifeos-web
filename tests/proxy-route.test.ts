@@ -49,6 +49,18 @@ describe("lifeos web proxy route", () => {
     expect((init.headers as Record<string, string>)["x-user-email"]).toBe("dev@example.com");
   });
 
+  it("blocks matrix proxy access when session is missing even with bypass enabled", async () => {
+    process.env.ALLOW_DEV_AUTH_BYPASS = "true";
+    process.env.DEV_AUTH_BYPASS_EMAIL = "dev@example.com";
+    getServerSessionMock.mockResolvedValue(null);
+
+    const mod = await import("../app/api/lifeos/[...path]/route");
+    const req = new NextRequest("http://localhost/api/lifeos/matrix/rooms");
+    const res = await mod.GET(req, { params: Promise.resolve({ path: ["matrix", "rooms"] }) });
+
+    expect(res.status).toBe(401);
+  });
+
   it("returns 500 when bypass is configured in production", async () => {
     vi.stubEnv("NODE_ENV", "production");
     process.env.ALLOW_DEV_AUTH_BYPASS = "true";

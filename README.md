@@ -22,3 +22,5 @@ npm run dev
 ## Security notes
 - `ALLOW_DEV_AUTH_BYPASS` is development-only and must remain `false` in production.
 - Any production runtime with dev bypass env vars configured is treated as a server misconfiguration.
+- Matrix proxy paths require a real authenticated session (dev bypass never grants Matrix access).
+- `GET /api/matrix/session` returns explicit recoverable auth states for missing/expired sessions and a short-lived Matrix bridge token.

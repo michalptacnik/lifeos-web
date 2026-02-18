@@ -11,18 +11,21 @@
 - Added food recipe feasibility UX (`/food/recipes/:id/availability`) with shortage highlighting and one-click quick add to food store.
 - Added recipe CRUD UX with inline validation, ingredient normalization hints (unit aliases), and explicit correction feedback before save.
 - Added session profile route (`/api/session/profile`) and client-side profile consumption.
+- Added matrix session bridge route (`/api/matrix/session`) with explicit session failure states and short-lived bridge token issuance.
 
 ## Key files
 - `app/page.tsx`
 - `lib/auth.ts`
 - `app/api/lifeos/[...path]/route.ts`
 - `app/api/session/profile/route.ts`
+- `app/api/matrix/session/route.ts`
 - `app/api/local-auth/*`
 
 ## Operational notes
 - Web requires same strong `INTERNAL_API_KEY` as API.
 - NextAuth credentials flow relies on API `/auth/login`.
 - Production must keep `ALLOW_DEV_AUTH_BYPASS=false` and `DEV_AUTH_BYPASS_EMAIL` unset.
+- Matrix proxy routes do not permit dev bypass actor fallback; authenticated session is mandatory.
 
 ## Open risks
 - `app/page.tsx` is large; further modularization is recommended.

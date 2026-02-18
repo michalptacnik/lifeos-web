@@ -133,3 +133,30 @@
 ### Next steps
 - Extract recipe CRUD/feasibility panel from `app/page.tsx` into dedicated components.
 - Add structured confirm dialogs for destructive recipe deletes.
+
+## 2026-02-17 (MVP3 matrix session/auth bridge)
+### What changed
+- Added `GET /api/matrix/session` route in `app/api/matrix/session/route.ts`:
+  - requires authenticated NextAuth session
+  - detects expired JWT session token and returns explicit recoverable 401 status
+  - fetches `/matrix/rooms` from API with trusted internal headers
+  - issues short-lived HMAC-signed matrix bridge token for client bootstrap
+- Added token helper `lib/matrix-bridge.ts` for bridge token creation.
+- Hardened generic API proxy in `app/api/lifeos/[...path]/route.ts` so `matrix/*` paths require a real session and cannot use dev bypass fallback.
+- Added regression tests:
+  - `tests/matrix-session-route.test.ts`
+  - updated `tests/proxy-route.test.ts` for matrix no-bypass guarantee
+- Updated `README.md` and `docs/CODEX_MEMORY.md` for matrix auth-bridge behavior.
+
+### Why
+- Execute MVP3 web session/auth bridge scope so matrix access has explicit, recoverable auth failure modes and no bypass path.
+
+### Commands/tests run
+- `./node_modules/.bin/tsc --noEmit && npm run test && npm run build`
+
+### Known issues/risks
+- Bridge token is currently web-issued and API does not yet validate it; server-side token validation can be added in a follow-up hardening pass.
+
+### Next steps
+- Integrate `GET /api/matrix/session` into matrix client boot flow in UI.
+- Add server-side bridge token verification path for matrix mutation APIs.

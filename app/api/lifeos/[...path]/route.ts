@@ -39,6 +39,10 @@ async function proxy(request: NextRequest, path: string[]) {
   }
 
   const session = await getServerSession(buildAuthOptions());
+  const isMatrixPath = path[0] === "matrix";
+  if (isMatrixPath && !session?.user?.email) {
+    return NextResponse.json({ message: "Matrix operations require authenticated session" }, { status: 401 });
+  }
   const actorEmail = session?.user?.email?.toLowerCase() ?? bypass.actorEmail;
 
   if (!actorEmail) {
