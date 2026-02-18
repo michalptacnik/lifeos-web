@@ -12,6 +12,7 @@
 - Added recipe CRUD UX with inline validation, ingredient normalization hints (unit aliases), and explicit correction feedback before save.
 - Added session profile route (`/api/session/profile`) and client-side profile consumption.
 - Added matrix session bridge route (`/api/matrix/session`) with explicit session failure states and short-lived bridge token issuance.
+- Added Matrix client shell in dashboard app: room list, timeline composer, unread badges, and contextual quick actions from task/inventory focus.
 
 ## Key files
 - `app/page.tsx`
@@ -19,6 +20,7 @@
 - `app/api/lifeos/[...path]/route.ts`
 - `app/api/session/profile/route.ts`
 - `app/api/matrix/session/route.ts`
+- `lib/matrix-bridge.ts`
 - `app/api/local-auth/*`
 
 ## Operational notes

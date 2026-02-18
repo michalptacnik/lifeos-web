@@ -160,3 +160,31 @@
 ### Next steps
 - Integrate `GET /api/matrix/session` into matrix client boot flow in UI.
 - Add server-side bridge token verification path for matrix mutation APIs.
+
+## 2026-02-17 (MVP3 custom matrix client UI)
+### What changed
+- Extended `app/page.tsx` with a new `chat` app view and dashboard launcher card.
+- Implemented Matrix client shell UX:
+  - room list with unread badges and explicit sync action
+  - timeline panel with composer and send states (`sending/sent/failed`)
+  - progressive disclosure of bridge details in an advanced panel
+- Added contextual quick actions to inject workflow context directly into chat composer:
+  - share active task
+  - share food context
+  - share daily focus
+- Wired chat initialization to `GET /api/matrix/session` only when chat view opens (event-driven load; no polling loops).
+- Added room-read behavior that explicitly clears unread signal and emits relay update hook.
+- Updated `README.md` and `docs/CODEX_MEMORY.md` for matrix UI behavior.
+
+### Why
+- Execute MVP3 chat UI scope with a LifeOS-native workflow surface instead of a generic clone, while keeping core chat path simple and explicit.
+
+### Commands/tests run
+- `./node_modules/.bin/tsc --noEmit && npm run test && npm run build`
+
+### Known issues/risks
+- Timeline currently uses local optimistic state and relay hooks; historical message backfill API is not yet exposed.
+
+### Next steps
+- Connect timeline read model to backend event history endpoint when available.
+- Add mobile-optimized composer affordances and keyboard shortcuts for desktop power flow.

@@ -5,7 +5,7 @@ import { signIn, signOut, useSession } from "next-auth/react";
 
 type TaskStatus = "TODO" | "IN_PROCESS" | "DONE";
 type TabKey = "kanban" | "worktime";
-type AppView = "dashboard" | "tasks" | "calendar" | "inventory";
+type AppView = "dashboard" | "tasks" | "calendar" | "inventory" | "chat";
 type AreaKey = "HOME" | "BUDGET" | "WORK";
 type AuthMode = "login" | "register";
 type ResourceKey = "tasks" | "worktime" | "automation" | "inventory" | "food";
@@ -140,6 +140,39 @@ type RecipeFormErrors = {
   name?: string;
   ingredients?: string;
   rows: Record<string, { name?: string; quantity?: string; unit?: string }>;
+};
+
+type MatrixRoomMember = {
+  email: string;
+  matrixUserId: string | null;
+  membership: "JOINED" | "INVITED" | "LEFT";
+  unreadCount: number;
+  notificationCount: number;
+};
+
+type MatrixRoom = {
+  id: string;
+  externalRoomId: string;
+  alias: string | null;
+  name: string;
+  memberships: MatrixRoomMember[];
+};
+
+type MatrixSessionPayload = {
+  status: "ok";
+  actor: { email: string; displayName: string | null };
+  bridge: { token: string; expiresAt: string };
+  rooms: MatrixRoom[];
+};
+
+type MatrixMessage = {
+  id: string;
+  roomId: string;
+  body: string;
+  sentAt: string;
+  senderEmail: string;
+  state: "sending" | "sent" | "failed";
+  source: "user" | "quick_action";
 };
 
 const columns: TaskStatus[] = ["TODO", "IN_PROCESS", "DONE"];
@@ -308,6 +341,15 @@ export default function HomePage() {
   const [automationChanges, setAutomationChanges] = useState<NonNullable<AutomationPlanResponse["changes"]> | null>(null);
   const [automationBusy, setAutomationBusy] = useState(false);
   const [automationArea, setAutomationArea] = useState<AreaKey>("WORK");
+  const [matrixRooms, setMatrixRooms] = useState<MatrixRoom[]>([]);
+  const [matrixSelectedRoomId, setMatrixSelectedRoomId] = useState<string>("");
+  const [matrixBridgeExpiresAt, setMatrixBridgeExpiresAt] = useState<string | null>(null);
+  const [matrixBridgeToken, setMatrixBridgeToken] = useState<string | null>(null);
+  const [matrixComposer, setMatrixComposer] = useState("");
+  const [matrixMessages, setMatrixMessages] = useState<MatrixMessage[]>([]);
+  const [matrixBusy, setMatrixBusy] = useState(false);
+  const [matrixLoaded, setMatrixLoaded] = useState(false);
+  const [matrixStatusMessage, setMatrixStatusMessage] = useState<string | null>(null);
 
   const selectedTask = useMemo(() => tasks.find((t) => t.id === selectedTaskId) ?? null, [tasks, selectedTaskId]);
   const activeTask = worktime.activeSession?.task ?? selectedTask;
@@ -375,6 +417,19 @@ export default function HomePage() {
     return inventoryItems.filter((item) => item.subtype === "FOOD");
   }, [inventoryItems]);
   const selectedRecipe = useMemo(() => recipes.find((recipe) => recipe.id === selectedRecipeId) ?? null, [recipes, selectedRecipeId]);
+  const selectedMatrixRoom = useMemo(
+    () => matrixRooms.find((room) => room.id === matrixSelectedRoomId) ?? null,
+    [matrixRooms, matrixSelectedRoomId]
+  );
+  const selectedRoomMessages = useMemo(() => {
+    return matrixMessages.filter((message) => message.roomId === matrixSelectedRoomId).sort((a, b) => a.sentAt.localeCompare(b.sentAt));
+  }, [matrixMessages, matrixSelectedRoomId]);
+  const totalMatrixUnread = useMemo(() => {
+    return matrixRooms.reduce((sum, room) => {
+      const membership = room.memberships.find((member) => member.email === effectiveUserEmail);
+      return sum + (membership?.unreadCount ?? 0);
+    }, 0);
+  }, [matrixRooms, effectiveUserEmail]);
   async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(`/api/lifeos${path}`, {
       ...init,
@@ -449,6 +504,133 @@ export default function HomePage() {
     void loadResources(resources, { showLoading: false });
   }
 
+  async function loadMatrixSession() {
+    if (!effectiveUserEmail) return;
+    setMatrixBusy(true);
+    setMatrixStatusMessage(null);
+    try {
+      const res = await fetch("/api/matrix/session", { cache: "no-store" });
+      const raw = await res.text();
+      const payload = raw ? JSON.parse(raw) : null;
+      if (!res.ok) {
+        throw new Error(payload?.message ?? `Matrix session failed: ${res.status}`);
+      }
+
+      const matrix = payload as MatrixSessionPayload;
+      setMatrixRooms(matrix.rooms);
+      setMatrixBridgeExpiresAt(matrix.bridge.expiresAt);
+      setMatrixBridgeToken(matrix.bridge.token);
+      setMatrixSelectedRoomId((prev) => {
+        if (prev && matrix.rooms.some((room) => room.id === prev)) return prev;
+        return matrix.rooms[0]?.id ?? "";
+      });
+      setMatrixLoaded(true);
+      setMatrixStatusMessage(`Matrix connected. ${matrix.rooms.length} room(s) available.`);
+    } catch (err) {
+      setMatrixStatusMessage((err as Error).message);
+    } finally {
+      setMatrixBusy(false);
+    }
+  }
+
+  async function markMatrixRoomRead(roomId: string) {
+    if (!effectiveUserEmail) return;
+    setMatrixRooms((prev) =>
+      prev.map((room) =>
+        room.id === roomId
+          ? {
+              ...room,
+              memberships: room.memberships.map((member) =>
+                member.email === effectiveUserEmail
+                  ? { ...member, unreadCount: 0, notificationCount: 0 }
+                  : member
+              )
+            }
+          : room
+      )
+    );
+
+    try {
+      await api(`/matrix/rooms/${roomId}/relay`, {
+        method: "POST",
+        body: JSON.stringify({
+          externalEventId: `read-${Date.now()}`,
+          eventType: "m.lifeos.read",
+          unreadByEmail: [{ email: effectiveUserEmail, unreadCount: 0, notificationCount: 0 }]
+        })
+      });
+    } catch {
+    }
+  }
+
+  function queueMatrixQuickAction(kind: "task" | "inventory" | "focus") {
+    if (kind === "task") {
+      const source = activeTask ?? tasks.find((task) => task.status !== "DONE");
+      if (!source) {
+        setMatrixStatusMessage("No task available to share.");
+        return;
+      }
+      setMatrixComposer(`Task context: ${source.title}${source.project ? ` (${source.project})` : ""}`);
+      return;
+    }
+
+    if (kind === "inventory") {
+      const shortages = recipes
+        .slice(0, 1)
+        .flatMap((recipe) => recipe.ingredients.slice(0, 2).map((ingredient) => `${ingredient.name} ${ingredient.quantity}${ingredient.unit}`));
+      if (shortages.length === 0) {
+        setMatrixComposer(`Food store snapshot: ${foodInventoryItems.length} food item(s) tracked.`);
+        return;
+      }
+      setMatrixComposer(`Food context: ${shortages.join(", ")}`);
+      return;
+    }
+
+    setMatrixComposer(`Daily focus: ${todayTasks.length} task(s) touching today, unread chat ${totalMatrixUnread}.`);
+  }
+
+  async function sendMatrixMessage() {
+    if (!matrixSelectedRoomId || !effectiveUserEmail) return;
+    const body = matrixComposer.trim();
+    if (!body) return;
+
+    const messageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimistic: MatrixMessage = {
+      id: messageId,
+      roomId: matrixSelectedRoomId,
+      body,
+      sentAt: new Date().toISOString(),
+      senderEmail: effectiveUserEmail,
+      state: "sending",
+      source: body.startsWith("Task context:") || body.startsWith("Food context:") || body.startsWith("Daily focus:")
+        ? "quick_action"
+        : "user"
+    };
+
+    setMatrixMessages((prev) => [...prev, optimistic]);
+    setMatrixComposer("");
+    setMatrixBusy(true);
+    setMatrixStatusMessage(null);
+
+    try {
+      await api(`/matrix/rooms/${matrixSelectedRoomId}/relay`, {
+        method: "POST",
+        body: JSON.stringify({
+          externalEventId: messageId,
+          eventType: "m.room.message",
+          payload: { body, msgtype: "m.text", source: optimistic.source }
+        })
+      });
+      setMatrixMessages((prev) => prev.map((msg) => (msg.id === messageId ? { ...msg, state: "sent" } : msg)));
+      setMatrixStatusMessage("Message sent.");
+    } catch {
+      setMatrixMessages((prev) => prev.map((msg) => (msg.id === messageId ? { ...msg, state: "failed" } : msg)));
+      setMatrixStatusMessage("Message failed to send. Retry from composer.");
+    } finally {
+      setMatrixBusy(false);
+    }
+  }
+
   useEffect(() => {
     void loadResources(["tasks", "inventory", "worktime", "automation", "food"], { showLoading: true });
   }, [effectiveUserEmail]);
@@ -490,9 +672,23 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    setMatrixLoaded(false);
+    setMatrixRooms([]);
+    setMatrixSelectedRoomId("");
+    setMatrixBridgeExpiresAt(null);
+    setMatrixBridgeToken(null);
+    setMatrixMessages([]);
+  }, [effectiveUserEmail]);
+
+  useEffect(() => {
     setRecipeAvailability(null);
     setRecipeMessage(null);
   }, [selectedRecipeId]);
+
+  useEffect(() => {
+    if (view !== "chat" || matrixLoaded || !effectiveUserEmail) return;
+    void loadMatrixSession();
+  }, [view, matrixLoaded, effectiveUserEmail]);
 
   useEffect(() => {
     if (!worktime.activeSession) return;
@@ -1083,7 +1279,7 @@ export default function HomePage() {
               <div>
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">LifeOS App</p>
                 <h1 className="text-2xl font-semibold text-slate-900">
-                  {view === "tasks" ? "Work / Tasks" : view === "calendar" ? "Calendar" : "Inventory"}
+                  {view === "tasks" ? "Work / Tasks" : view === "calendar" ? "Calendar" : view === "inventory" ? "Inventory" : "Matrix Chat"}
                 </h1>
               </div>
               <div className="flex gap-2">
@@ -1186,10 +1382,20 @@ export default function HomePage() {
                 </div>
                 <span className="text-xs font-medium text-slate-700">Inventory</span>
               </button>
-              <div className="flex flex-col items-center gap-2 text-center opacity-70">
-                <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-100 text-lg font-bold text-slate-500">+</div>
-                <span className="text-xs font-medium text-slate-600">Empty</span>
-              </div>
+              <button
+                onClick={() => setView("chat")}
+                className="group flex flex-col items-center gap-2 text-center"
+              >
+                <div className="relative flex h-16 w-16 items-center justify-center rounded-2xl bg-sky-600 text-lg font-bold text-white shadow-md transition group-hover:scale-105">
+                  M
+                  {totalMatrixUnread > 0 ? (
+                    <span className="absolute -right-2 -top-2 rounded-full bg-rose-500 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                      {totalMatrixUnread}
+                    </span>
+                  ) : null}
+                </div>
+                <span className="text-xs font-medium text-slate-700">Matrix</span>
+              </button>
             </div>
           </article>
 
@@ -1466,6 +1672,128 @@ export default function HomePage() {
                 <p className="mt-3 text-xs text-slate-500">
                   Existing ICS feed: <a className="underline" href="/api/lifeos/calendar/tasks.ics" target="_blank" rel="noreferrer">/api/lifeos/calendar/tasks.ics</a>
                 </p>
+              </article>
+            </section>
+          )}
+
+          {view === "chat" && (
+            <section className="mt-4 grid gap-4 lg:grid-cols-[1fr_2fr]">
+              <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="text-lg font-semibold text-slate-900">Rooms</h2>
+                  <button
+                    onClick={() => void loadMatrixSession()}
+                    disabled={matrixBusy}
+                    className="rounded-full bg-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 disabled:opacity-60"
+                  >
+                    {matrixBusy ? "Syncing..." : "Sync"}
+                  </button>
+                </div>
+                <p className="mt-1 text-sm text-slate-600">Element-like room list with LifeOS unread context.</p>
+                {matrixStatusMessage ? (
+                  <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-700">{matrixStatusMessage}</p>
+                ) : null}
+                <div className="mt-3 space-y-2">
+                  {matrixRooms.length === 0 ? (
+                    <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">No Matrix rooms yet.</p>
+                  ) : (
+                    matrixRooms.map((room) => {
+                      const membership = room.memberships.find((member) => member.email === effectiveUserEmail);
+                      const unread = membership?.unreadCount ?? 0;
+                      return (
+                        <button
+                          key={room.id}
+                          onClick={() => {
+                            setMatrixSelectedRoomId(room.id);
+                            void markMatrixRoomRead(room.id);
+                          }}
+                          className={`w-full rounded-xl border px-3 py-2 text-left ${
+                            matrixSelectedRoomId === room.id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-800"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-sm font-semibold">{room.name}</p>
+                            {unread > 0 ? (
+                              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${matrixSelectedRoomId === room.id ? "bg-white/20 text-white" : "bg-rose-100 text-rose-700"}`}>
+                                {unread}
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className={`mt-1 text-xs ${matrixSelectedRoomId === room.id ? "text-slate-200" : "text-slate-500"}`}>
+                            {room.alias || room.externalRoomId}
+                          </p>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </article>
+
+              <article className="rounded-3xl border border-white/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(52,82,120,0.12)]">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-900">{selectedMatrixRoom?.name || "Timeline"}</h2>
+                    <p className="mt-1 text-sm text-slate-600">Simple core path first, advanced details on demand.</p>
+                  </div>
+                  <details>
+                    <summary className="cursor-pointer text-xs font-semibold text-slate-600">Advanced</summary>
+                    <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                      Bridge expiry: {matrixBridgeExpiresAt ? new Date(matrixBridgeExpiresAt).toLocaleTimeString() : "not loaded"}
+                      <br />
+                      Token: {matrixBridgeToken ? `${matrixBridgeToken.slice(0, 16)}...` : "not loaded"}
+                    </div>
+                  </details>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" onClick={() => queueMatrixQuickAction("task")} className="rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700">Share active task</button>
+                  <button type="button" onClick={() => queueMatrixQuickAction("inventory")} className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">Share food context</button>
+                  <button type="button" onClick={() => queueMatrixQuickAction("focus")} className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">Share daily focus</button>
+                </div>
+
+                <div className="mt-3 space-y-2 rounded-2xl border border-slate-200 bg-white p-3">
+                  {selectedRoomMessages.length === 0 ? (
+                    <p className="text-sm text-slate-500">No local timeline events yet. Send first message.</p>
+                  ) : (
+                    selectedRoomMessages.map((message) => (
+                      <div key={message.id} className="rounded-xl bg-slate-50 px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-semibold text-slate-700">{message.senderEmail}</p>
+                          <span className={`text-[11px] ${message.state === "failed" ? "text-rose-700" : message.state === "sending" ? "text-amber-700" : "text-emerald-700"}`}>
+                            {message.state}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-sm text-slate-800">{message.body}</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void sendMatrixMessage();
+                  }}
+                  className="mt-3"
+                >
+                  <textarea
+                    value={matrixComposer}
+                    onChange={(event) => setMatrixComposer(event.target.value)}
+                    rows={3}
+                    placeholder="Write a room message..."
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2"
+                  />
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <p className="text-xs text-slate-500">Event-driven updates only: no background polling loop.</p>
+                    <button
+                      type="submit"
+                      disabled={!matrixSelectedRoomId || !matrixComposer.trim() || matrixBusy}
+                      className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Send
+                    </button>
+                  </div>
+                </form>
               </article>
             </section>
           )}

@@ -12,6 +12,7 @@ Next.js frontend for LifeOS with responsive module-driven UX.
 - Notifications Center
 
 Inventory includes food-specific recipe CRUD, feasibility checks, and quick-add actions for missing ingredients.
+Matrix includes a LifeOS-oriented chat shell (rooms, timeline, composer, unread signals, and context quick actions).
 
 ## Quick Start
 ```bash
